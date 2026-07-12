@@ -162,6 +162,32 @@ def test_public_properties_ignore_stale_access_cookie():
     response = client.get("/api/v1/public/properties/")
     assert response.status_code == 200
 
+def test_cors_allows_admin_cookie_credentials(settings):
+    settings.CORS_ALLOWED_ORIGINS = ["http://127.0.0.1:5173"]
+    client = APIClient(HTTP_ORIGIN="http://127.0.0.1:5173")
+    response = client.options("/api/v1/admin/auth/login/", HTTP_ACCESS_CONTROL_REQUEST_METHOD="POST")
+    assert response.status_code == 200
+    assert response["access-control-allow-credentials"] == "true"
+
+def test_sitemap_lists_only_public_pages():
+    Property.objects.create(title="Rascunho", slug="rascunho", city="X", neighborhood="Y")
+    Property.objects.create(
+        title="Casa Publica",
+        slug="casa-publica",
+        city="X",
+        neighborhood="Y",
+        public_description="Boa",
+        status=Property.Status.AVAILABLE,
+        published=True,
+    )
+    client = APIClient(HTTP_HOST="example.com")
+    response = client.get("/sitemap.xml")
+    body = response.content.decode()
+    assert response.status_code == 200
+    assert "https://example.com/imoveis/casa-publica" not in body
+    assert "http://example.com/imoveis/casa-publica" in body
+    assert "rascunho" not in body
+
 def test_admin_can_validate_property_media():
     admin = get_user_model().objects.create_superuser("validator", "validator@example.com", "secret")
     prop = Property.objects.create(title="Casa", slug="casa-validar", city="X", neighborhood="Y")

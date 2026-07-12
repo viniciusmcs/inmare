@@ -16,6 +16,7 @@ import {
   ImagePlus,
   LogOut,
   Mail,
+  Menu,
   MessageCircle,
   Plus,
   Save,
@@ -26,6 +27,7 @@ import {
   Upload,
   UserCheck,
   Users,
+  X,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "./api";
@@ -46,6 +48,131 @@ const statusLabels: Record<string, string> = {
   rented: "Alugado",
   archived: "Arquivado",
 };
+
+const fieldLabels: Record<string, string> = {
+  title: "Título",
+  slug: "Link do imóvel",
+  public_description: "Descrição pública",
+  property_type: "Tipo",
+  purpose: "Finalidade",
+  status: "Status",
+  price: "Valor",
+  condominium_fee: "Condomínio",
+  iptu: "IPTU",
+  price_on_request: "Consultar valor",
+  city: "Cidade",
+  neighborhood: "Bairro",
+  public_reference: "Referência pública",
+  approximate_latitude: "Latitude aproximada",
+  approximate_longitude: "Longitude aproximada",
+  private_address: "Endereço privado",
+  bedrooms: "Dormitórios",
+  suites: "Suítes",
+  bathrooms: "Banheiros",
+  parking_spaces: "Vagas",
+  private_area: "Área privativa",
+  total_area: "Área total",
+  land_dimensions: "Dimensões do terreno",
+  solar_orientation: "Orientação solar",
+  features: "Características",
+  accepts_financing: "Aceita financiamento",
+  accepts_exchange: "Aceita permuta",
+  featured: "Destaque",
+  launch: "Lançamento",
+  exclusive: "Exclusivo",
+  reviewed_at: "Revisão comercial",
+  image: "Imagem principal",
+  file: "Arquivo",
+  media_ids: "Ordem das mídias",
+  name: "Nome",
+  phone: "WhatsApp",
+  email: "E-mail",
+  message: "Mensagem",
+  photo: "Foto",
+  image_url: "URL da imagem",
+  link_url: "Link",
+  link_label: "Texto do botão",
+  text: "Texto",
+  question: "Pergunta",
+  answer: "Resposta",
+};
+
+const decimalPlaces: Record<string, number> = {
+  price: 2,
+  condominium_fee: 2,
+  iptu: 2,
+  private_area: 2,
+  total_area: 2,
+  approximate_latitude: 6,
+  approximate_longitude: 6,
+};
+
+const integerFields = new Set(["bedrooms", "suites", "bathrooms", "parking_spaces"]);
+
+function fieldLabel(field: string) {
+  return fieldLabels[field] ?? field.replaceAll("_", " ");
+}
+
+function normalizeDecimalInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.includes(",")) return trimmed.replace(/\./g, "").replace(",", ".");
+  return trimmed;
+}
+
+function localFormError(form: Record<string, string | boolean>) {
+  for (const field of integerFields) {
+    const value = String(form[field] ?? "").trim();
+    if (!value) continue;
+    if (!/^\d+$/.test(value)) return `${fieldLabel(field)}: informe apenas número inteiro, sem vírgula ou ponto.`;
+  }
+  for (const [field, places] of Object.entries(decimalPlaces)) {
+    const raw = String(form[field] ?? "").trim();
+    if (!raw) continue;
+    const normalized = normalizeDecimalInput(raw);
+    if (!/^-?\d+(\.\d+)?$/.test(normalized))
+      return `${fieldLabel(field)}: digite apenas números. Exemplo: ${places === 2 ? "1000,50" : "-29,123456"}.`;
+    const decimals = normalized.split(".")[1]?.length ?? 0;
+    if (decimals > places)
+      return `${fieldLabel(field)}: use no máximo ${places} casa${places > 1 ? "s" : ""} decimal${places > 1 ? "is" : ""}.`;
+  }
+  return "";
+}
+
+function flattenErrorMessages(data: unknown, path = ""): string[] {
+  if (!data) return [];
+  if (typeof data === "string") return [path ? `${path}: ${data}` : data];
+  if (Array.isArray(data)) return data.flatMap((item) => flattenErrorMessages(item, path));
+  if (typeof data === "object")
+    return Object.entries(data as Record<string, unknown>).flatMap(([key, value]) =>
+      flattenErrorMessages(value, path ? `${path}.${key}` : key),
+    );
+  return [String(data)];
+}
+
+function translateBackendMessage(field: string, message: string) {
+  const key = field.split(".").pop() ?? field;
+  const label = fieldLabel(key);
+  const lower = message.toLowerCase();
+  const places = decimalPlaces[field] ?? decimalPlaces[key];
+  if (lower.includes("no more than") && lower.includes("decimal"))
+    return `${label}: use no máximo ${places ?? 2} casas decimais.`;
+  if (lower.includes("max_digits") || lower.includes("whole digits") || lower.includes("ensure that there are no more than"))
+    return `${label}: o número está grande demais. Diminua a quantidade de dígitos.`;
+  if (lower.includes("valid number") || lower.includes("número válido") || lower.includes("a valid number"))
+    return `${label}: digite apenas números. Use vírgula para centavos, por exemplo 1000,50.`;
+  if (lower.includes("required") || lower.includes("obrigatório") || lower.includes("blank"))
+    return `${label}: preencha este campo antes de salvar.`;
+  if (lower.includes("valid integer") || lower.includes("inteiro"))
+    return `${label}: informe apenas número inteiro.`;
+  if (lower.includes("valid choice") || lower.includes("escolha"))
+    return `${label}: escolha uma opção válida da lista.`;
+  if (lower.includes("valid date") || lower.includes("data"))
+    return `${label}: informe uma data válida.`;
+  if (lower.includes("duplicate") || lower.includes("duplicado"))
+    return `${label}: este item já existe.`;
+  return `${label}: ${message}`;
+}
 
 function formatDate(value?: string) {
   if (!value) return "";
@@ -79,6 +206,23 @@ function apiError(error: unknown) {
       return "Este arquivo já foi adicionado ao imóvel.";
   }
   return "Não foi possível concluir. Confira os dados e tente novamente.";
+}
+
+function friendlyApiError(error: unknown) {
+  if (error instanceof Error && error.message.startsWith("friendly:"))
+    return error.message.slice(9);
+  const response = error as { response?: { data?: unknown } };
+  const data = response.response?.data;
+  if (data && typeof data === "object") {
+    const translated = flattenErrorMessages(data).map((entry) => {
+      const separator = entry.indexOf(":");
+      if (separator < 0) return entry;
+      return translateBackendMessage(entry.slice(0, separator), entry.slice(separator + 1).trim());
+    });
+    if (translated.length) return translated.slice(0, 4).join(" ");
+  }
+  if (typeof data === "string" && data.trim()) return data;
+  return apiError(error);
 }
 
 const blank: Record<string, string | boolean> = {
@@ -115,6 +259,7 @@ export default function AdminPanel() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [selected, setSelected] = useState<Property | null>(null);
   const [section, setSection] = useState<"properties" | "clients" | "content">("properties");
+  const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   const [form, setForm] = useState<Record<string, string | boolean>>(blank);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -132,6 +277,13 @@ export default function AdminPanel() {
     }, 3000);
     return () => window.clearTimeout(timer);
   }, [notice, error]);
+  useEffect(() => {
+    setAdminMenuOpen(false);
+  }, [section, selected?.id]);
+  useEffect(() => {
+    document.body.classList.toggle("admin-menu-open", adminMenuOpen);
+    return () => document.body.classList.remove("admin-menu-open");
+  }, [adminMenuOpen]);
   const properties = useQuery({
     queryKey: ["admin-properties"],
     enabled: authenticated !== false,
@@ -199,6 +351,8 @@ export default function AdminPanel() {
         .filter(([key]) => !String(form[key] ?? "").trim())
         .map(([, label]) => label);
       if (missing.length) throw new Error(`required:${missing.join(", ")}`);
+      const friendlyValidation = localFormError(form);
+      if (friendlyValidation) throw new Error(`friendly:${friendlyValidation}`);
       const payload = Object.fromEntries(
         Object.entries(form).map(([k, v]) => {
           const numeric = [
@@ -218,7 +372,7 @@ export default function AdminPanel() {
             numeric && v === ""
               ? null
               : numeric && typeof v === "string"
-                ? v.replace(",", ".")
+                ? normalizeDecimalInput(v)
                 : v,
           ];
         }),
@@ -240,7 +394,7 @@ export default function AdminPanel() {
     },
     onError: (saveError) => {
       setNotice("");
-      setError(apiError(saveError));
+      setError(friendlyApiError(saveError));
     },
   });
   const action = useMutation({
@@ -277,7 +431,7 @@ export default function AdminPanel() {
       setError("");
       refresh();
     },
-    onError: (actionError) => setError(apiError(actionError)),
+    onError: (actionError) => setError(friendlyApiError(actionError)),
   });
   const updateLeadStatus = async (lead: Lead) => {
     try {
@@ -292,7 +446,7 @@ export default function AdminPanel() {
       queryClient.invalidateQueries({ queryKey: ["admin-leads"] });
     } catch (leadError) {
       setNotice("");
-      setError(apiError(leadError));
+      setError(friendlyApiError(leadError));
     }
   };
   const deleteLead = async (lead: Lead) => {
@@ -303,7 +457,7 @@ export default function AdminPanel() {
       queryClient.invalidateQueries({ queryKey: ["admin-leads"] });
     } catch (leadError) {
       setNotice("");
-      setError(apiError(leadError));
+      setError(friendlyApiError(leadError));
     }
   };
   const upload = async (file: File) => {
@@ -320,7 +474,7 @@ export default function AdminPanel() {
       setError("");
       refresh();
     } catch (uploadError) {
-      setError(`${file.name}: ${apiError(uploadError)}`);
+      setError(`${file.name}: ${friendlyApiError(uploadError)}`);
     }
   };
   const reorder = async (draggedId: string, targetId: string) => {
@@ -340,7 +494,7 @@ export default function AdminPanel() {
       setSelected(response.data);
       setNotice("Ordem das mídias atualizada.");
     } catch (reorderError) {
-      setError(apiError(reorderError));
+      setError(friendlyApiError(reorderError));
       const response = await api.get<Property>(`/admin/properties/${selected.id}/`);
       setSelected(response.data);
     }
@@ -355,7 +509,7 @@ export default function AdminPanel() {
       setNotice("Foto principal atualizada.");
       refresh();
     } catch (primaryError) {
-      setError(apiError(primaryError));
+      setError(friendlyApiError(primaryError));
     }
   };
   const importTxt = async (file: File) => {
@@ -383,7 +537,7 @@ export default function AdminPanel() {
       setNotice("TXT importado. Confira os campos preenchidos antes de salvar.");
       setError("");
     } catch (txtError) {
-      setError(apiError(txtError));
+      setError(friendlyApiError(txtError));
     }
   };
   if (authenticated === false)
@@ -416,23 +570,35 @@ export default function AdminPanel() {
           }}
         />
       )}
-      <aside>
+      <aside className={adminMenuOpen ? "open" : ""}>
+        <button
+          className="admin-mobile-menu"
+          type="button"
+          aria-label={adminMenuOpen ? "Fechar menu administrativo" : "Abrir menu administrativo"}
+          aria-controls="admin-panel-nav"
+          aria-expanded={adminMenuOpen}
+          onClick={() => setAdminMenuOpen((open) => !open)}
+        >
+          {adminMenuOpen ? <X /> : <Menu />}
+          <span>Menu do painel</span>
+        </button>
         <img src="/assets/brand/logo.jpeg" alt="In Mare" />
-        <nav>
-          <button onClick={() => { setSection("properties"); setSelected(null); }}>
+        <nav id="admin-panel-nav">
+          <button onClick={() => { setSection("properties"); setSelected(null); setAdminMenuOpen(false); }}>
             <Building2 /> Imóveis
           </button>
-          <button onClick={() => { setSection("clients"); setSelected(null); }}>
+          <button onClick={() => { setSection("clients"); setSelected(null); setAdminMenuOpen(false); }}>
             <Users /> Clientes
           </button>
-          <button onClick={() => { setSection("content"); setSelected(null); }}>
+          <button onClick={() => { setSection("content"); setSelected(null); setAdminMenuOpen(false); }}>
             <Settings /> Conteúdo e redes
           </button>
-          <Link to="/">
+          <Link to="/" onClick={() => setAdminMenuOpen(false)}>
             <ArrowLeft /> Ver site
           </Link>
           <button
             onClick={async () => {
+              setAdminMenuOpen(false);
               await api.post("/admin/auth/logout/");
               setAuthenticated(false);
             }}
@@ -774,7 +940,7 @@ function ContentPanel({ notify }: { notify: (message: string, failed?: boolean) 
       setSettings(response.data);
       notify("Dados institucionais e redes sociais atualizados.");
       queryClient.invalidateQueries({ queryKey: ["public-settings"] });
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   const createItem = async (kind: "hero-slides" | "testimonials" | "faqs", payload: object) => {
     try {
@@ -782,7 +948,7 @@ function ContentPanel({ notify }: { notify: (message: string, failed?: boolean) 
       notify("Conteúdo adicionado com sucesso.");
       queryClient.invalidateQueries({ queryKey: ["admin-public-content"] });
       queryClient.invalidateQueries({ queryKey: ["public-content"] });
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   const removeItem = async (kind: "hero-slides" | "testimonials" | "faqs", id: string) => {
     try {
@@ -790,7 +956,7 @@ function ContentPanel({ notify }: { notify: (message: string, failed?: boolean) 
       notify("Conteúdo removido.");
       queryClient.invalidateQueries({ queryKey: ["admin-public-content"] });
       queryClient.invalidateQueries({ queryKey: ["public-content"] });
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   const toggleItem = async (kind: "hero-slides" | "testimonials" | "faqs", item: HeroSlide | Testimonial | FAQ) => {
     try {
@@ -798,7 +964,7 @@ function ContentPanel({ notify }: { notify: (message: string, failed?: boolean) 
       notify(item.active === false ? "Conteúdo ativado." : "Conteúdo ocultado.");
       queryClient.invalidateQueries({ queryKey: ["admin-public-content"] });
       queryClient.invalidateQueries({ queryKey: ["public-content"] });
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   const moveItem = async (kind: "hero-slides" | "testimonials" | "faqs", items: (HeroSlide | Testimonial | FAQ)[], index: number, amount: number) => {
     const target = index + amount;
@@ -811,7 +977,7 @@ function ContentPanel({ notify }: { notify: (message: string, failed?: boolean) 
       notify("Ordem atualizada.");
       queryClient.invalidateQueries({ queryKey: ["admin-public-content"] });
       queryClient.invalidateQueries({ queryKey: ["public-content"] });
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   const input = (name: keyof SiteSettings, label: string) => <label>{label}<input value={String(settings[name] ?? "")} onChange={(event) => setSettings({ ...settings, [name]: event.target.value })} /></label>;
   const textarea = (name: keyof SiteSettings, label: string) => <label>{label}<textarea rows={5} value={String(settings[name] ?? "")} onChange={(event) => setSettings({ ...settings, [name]: event.target.value })} /></label>;
@@ -840,22 +1006,22 @@ function InstitutionalImageCreator({ section, title, items, notify, onChanged }:
         await api.post("/admin/institutional-images/", body, { headers: { "Content-Type": "multipart/form-data" } });
       }
       setFiles([]); setCaption(""); setText(""); notify(`${files.length} imagem(ns) adicionada(s).`); onChanged();
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   const update = async (item: InstitutionalImage, payload: object, message: string) => {
     try { await api.patch(`/admin/institutional-images/${item.id}/`, payload); notify(message); onChanged(); }
-    catch (error) { notify(apiError(error), true); }
+    catch (error) { notify(friendlyApiError(error), true); }
   };
   const remove = async (item: InstitutionalImage) => {
     try { await api.delete(`/admin/institutional-images/${item.id}/`); notify("Imagem removida."); onChanged(); }
-    catch (error) { notify(apiError(error), true); }
+    catch (error) { notify(friendlyApiError(error), true); }
   };
   const move = async (index: number, amount: number) => {
     const target = index + amount; if (target < 0 || target >= items.length) return;
     try {
       await Promise.all([api.patch(`/admin/institutional-images/${items[index].id}/`, { position: target }), api.patch(`/admin/institutional-images/${items[target].id}/`, { position: index })]);
       notify("Ordem atualizada."); onChanged();
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   return <section className="admin-card institutional-creator"><h2>{title}</h2><p>{section === "team" ? "Adicione fotos da equipe, nomes/cargos e uma breve apresentação." : "Adicione imagens dos ambientes e momentos da imobiliária."}</p><div className="header-upload-form"><label className="header-drop"><ImagePlus /><b>Selecionar imagens</b><span>Você pode selecionar várias imagens de uma vez.</span><input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => setFiles(Array.from(event.target.files ?? []))} /></label><div className="institutional-fields"><label>{section === "team" ? "Nome ou identificação" : "Legenda"}<input value={caption} onChange={(event) => setCaption(event.target.value)} /></label><label>Texto sobre<textarea rows={4} value={text} onChange={(event) => setText(event.target.value)} /></label></div></div>{!!files.length && <div className="header-file-preview">{files.map((file) => <div key={`${file.name}-${file.size}`}><img src={URL.createObjectURL(file)} alt="" /><span>{file.name}</span></div>)}</div>}<button className="gold-button" onClick={create}><Plus /> Adicionar imagens</button><div className="header-admin-list">{items.map((item, index) => <article key={item.id}><img src={item.image_src} alt={item.title} /><div><b>{item.title || "Sem legenda"}</b><small>{item.active === false ? "Oculto" : "Ativo"}</small>{item.text && <small>{item.text}</small>}</div><span><button className="outline" aria-label="Subir" onClick={() => move(index, -1)}><ArrowUp /></button><button className="outline" aria-label="Descer" onClick={() => move(index, 1)}><ArrowDown /></button><button className="outline" onClick={() => update(item, { active: item.active === false }, item.active === false ? "Imagem ativada." : "Imagem ocultada.")}>{item.active === false ? "Ativar" : "Ocultar"}</button><button className="outline danger-action" onClick={() => remove(item)}><Trash2 /> Excluir</button></span></article>)}</div></section>;
 }
@@ -875,7 +1041,7 @@ function HeaderCreator({ onCreated, notify, items, onDelete, onToggle, onMove }:
         await api.post("/admin/hero-slides/", body, { headers: { "Content-Type": "multipart/form-data" } });
       }
       setFiles([]); notify(`${files.length} imagem(ns) adicionada(s) ao Header.`); onCreated();
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   return <section className="admin-card header-creator"><h2>Header</h2><p>As imagens passam automaticamente no fundo da Home e dos títulos de todas as páginas públicas, trocando a cada 5 segundos.</p><div className="header-upload-form"><label className="header-drop"><ImagePlus /><b>Selecionar imagens do Header</b><span>Você pode selecionar várias imagens de uma vez.</span><input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(event) => setFiles(Array.from(event.target.files ?? []))} /></label><div className="form-grid"><label>Título<input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Texto<input value={subtitle} onChange={(event) => setSubtitle(event.target.value)} /></label></div></div>{!!files.length && <div className="header-file-preview">{files.map((file) => <div key={`${file.name}-${file.size}`}><img src={URL.createObjectURL(file)} alt="" /><span>{file.name}</span></div>)}</div>}<button className="gold-button" onClick={create}><Plus /> Adicionar ao Header</button><div className="header-admin-list">{items.map((item, index) => <article key={item.id}><img src={item.image_src} alt={item.title} /><div><b>{item.title}</b><small>{item.active === false ? "Oculto" : "Ativo"}</small></div><span><button className="outline" aria-label="Subir" onClick={() => onMove(items, index, -1)}><ArrowUp /></button><button className="outline" aria-label="Descer" onClick={() => onMove(items, index, 1)}><ArrowDown /></button><button className="outline" onClick={() => onToggle(item)}>{item.active === false ? "Ativar" : "Ocultar"}</button><button className="outline danger-action" onClick={() => onDelete(item.id)}><Trash2 /> Excluir</button></span></article>)}</div></section>;
 }
@@ -894,7 +1060,7 @@ function TestimonialCreator({ onCreated, notify, items, onDelete, onToggle, onMo
       await api.post("/admin/testimonials/", body, { headers: { "Content-Type": "multipart/form-data" } });
       setValues({ name: "", role: "", text: "", position: "" }); setPhoto(null); setPreview("");
       notify("Relato adicionado com sucesso."); onCreated();
-    } catch (error) { notify(apiError(error), true); }
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   return <section className="admin-card testimonial-creator"><h2>Relatos de clientes</h2><p>Adicione a foto e o depoimento. O relato aparecerá automaticamente na Home.</p><div className="testimonial-admin-form"><label className="testimonial-photo-upload">{preview ? <img src={preview} alt="Prévia da foto" /> : <ImagePlus />}<span>{photo ? "Trocar foto" : "Selecionar foto"}</span><input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0] ?? null; setPhoto(file); setPreview(file ? URL.createObjectURL(file) : ""); }} /></label><div className="form-grid"><label>Nome *<input value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></label><label>Identificação<input placeholder="Ex.: Comprou com a In Mare" value={values.role} onChange={(event) => setValues({ ...values, role: event.target.value })} /></label><label>Ordem<input type="number" min="0" value={values.position} onChange={(event) => setValues({ ...values, position: event.target.value })} /></label><label className="testimonial-text-field">Depoimento *<textarea rows={6} value={values.text} onChange={(event) => setValues({ ...values, text: event.target.value })} /></label></div></div><button className="gold-button" onClick={create}><Plus /> Adicionar relato</button><div className="content-list testimonial-admin-list">{items.map((item, index) => <div key={item.id}><span className="testimonial-list-person">{item.photo_src ? <img src={item.photo_src} alt="" /> : <i>{item.name.slice(0, 1)}</i>}<b>{item.name}</b></span><span><button className="outline" aria-label="Subir" onClick={() => onMove(items, index, -1)}><ArrowUp /></button><button className="outline" aria-label="Descer" onClick={() => onMove(items, index, 1)}><ArrowDown /></button><button className="outline" onClick={() => onToggle(item)}>{item.active === false ? "Ativar" : "Ocultar"}</button><button className="outline danger-action" onClick={() => onDelete(item.id)}><Trash2 /> Excluir</button></span></div>)}</div></section>;
 }

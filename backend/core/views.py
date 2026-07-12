@@ -2,8 +2,11 @@ import os
 import tempfile
 import hashlib
 import mimetypes
+from xml.sax.saxutils import escape
+from django.conf import settings as django_settings
 from django.db import connection, transaction
 from django.db.models import Max, Min, Q
+from django.http import HttpResponse
 from datetime import timedelta
 from django.utils import timezone
 from rest_framework import mixins, permissions, status, viewsets
@@ -34,18 +37,60 @@ class HealthView(APIView):
         except Exception:
             return Response({"status": "error", "database": "error"}, status=503)
 
+def absolute_public_url(request, path):
+    configured = os.getenv("SITE_URL", "").rstrip("/")
+    base = configured or request.build_absolute_uri("/").rstrip("/")
+    return f"{base}{path}"
+
+def robots_txt(request):
+    lines = [
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /admin/",
+        "Disallow: /django-admin/",
+        "Disallow: /api/v1/admin/",
+        f"Sitemap: {absolute_public_url(request, '/sitemap.xml')}",
+        "",
+    ]
+    return HttpResponse("\n".join(lines), content_type="text/plain; charset=utf-8")
+
+def sitemap_xml(request):
+    static_paths = ["/", "/imoveis", "/imobiliaria", "/empreendimentos", "/encontrar-imovel", "/anuncie-seu-imovel", "/contato"]
+    urls = [(path, timezone.now(), "weekly", "0.8") for path in static_paths]
+    properties = Property.objects.filter(
+        published=True,
+        hidden=False,
+        archived_at__isnull=True,
+        status__in=[Property.Status.AVAILABLE, Property.Status.RESERVED, Property.Status.NEGOTIATING],
+    ).only("slug", "updated_at")
+    developments = Development.objects.filter(published=True, hidden=False).only("slug", "updated_at")
+    urls += [(f"/imoveis/{item.slug}", item.updated_at, "daily", "0.9") for item in properties]
+    urls += [(f"/empreendimentos/{item.slug}", item.updated_at, "weekly", "0.7") for item in developments]
+    body = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for path, updated_at, changefreq, priority in urls:
+        body.extend([
+            "  <url>",
+            f"    <loc>{escape(absolute_public_url(request, path))}</loc>",
+            f"    <lastmod>{updated_at.date().isoformat()}</lastmod>",
+            f"    <changefreq>{changefreq}</changefreq>",
+            f"    <priority>{priority}</priority>",
+            "  </url>",
+        ])
+    body.append("</urlset>")
+    return HttpResponse("\n".join(body), content_type="application/xml; charset=utf-8")
+
 class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
-    throttle_classes = [] if os.getenv("DEBUG", "true").lower() == "true" else [LoginThrottle]
+    throttle_classes = [] if django_settings.DEBUG else [LoginThrottle]
     def post(self, request):
         from django.contrib.auth import authenticate
         user = authenticate(username=request.data.get("username"), password=request.data.get("password"))
         if not user or not user.is_staff: return Response({"detail": "Credenciais inválidas."}, status=401)
         refresh = RefreshToken.for_user(user)
         response = Response({"user": {"username": user.username}})
-        response.set_cookie("access_token", str(refresh.access_token), httponly=True, secure=not os.getenv("DEBUG", "true") == "true", samesite="Lax")
-        response.set_cookie("refresh_token", str(refresh), httponly=True, secure=not os.getenv("DEBUG", "true") == "true", samesite="Lax")
+        response.set_cookie("access_token", str(refresh.access_token), httponly=True, secure=not django_settings.DEBUG, samesite="Lax")
+        response.set_cookie("refresh_token", str(refresh), httponly=True, secure=not django_settings.DEBUG, samesite="Lax")
         AuditEvent.objects.create(actor=user, action="auth.login", entity_type="User", entity_id=str(user.id))
         return response
 
@@ -69,7 +114,7 @@ class RefreshCookieView(APIView):
         try:
             refresh = RefreshToken(raw_refresh)
             response = Response({"detail": "Token renovado."})
-            response.set_cookie("access_token", str(refresh.access_token), httponly=True, secure=not os.getenv("DEBUG", "true") == "true", samesite="Lax")
+            response.set_cookie("access_token", str(refresh.access_token), httponly=True, secure=not django_settings.DEBUG, samesite="Lax")
             return response
         except Exception:
             return Response({"detail": "Refresh token inválido."}, status=401)

@@ -31,11 +31,25 @@ export function Header() {
     window.addEventListener("scroll", scroll, { passive: true });
     return () => { window.removeEventListener("favorites-changed", update); window.removeEventListener("scroll", scroll); };
   }, []);
+  useEffect(() => {
+    setOpen(false);
+  }, [location.pathname]);
+  useEffect(() => {
+    document.body.classList.toggle("menu-open", open);
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", close);
+    return () => {
+      document.body.classList.remove("menu-open");
+      window.removeEventListener("keydown", close);
+    };
+  }, [open]);
   return (
     <header className={`header ${scrolled ? "scrolled" : ""} ${location.pathname !== "/" ? "inner" : ""}`}>
       <Link className="brand" to="/"><img src="/assets/brand/logo.jpeg" alt="In Mare" /></Link>
-      <button className="menu" aria-label="Abrir menu" onClick={() => setOpen(!open)}><Menu /></button>
-      <nav className={open ? "open" : ""}>
+      <button className="menu" type="button" aria-label={open ? "Fechar menu" : "Abrir menu"} aria-controls="site-menu" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? <X /> : <Menu />}</button>
+      <nav id="site-menu" className={open ? "open" : ""}>
         {[["/", "Início"], ["/imobiliaria", "A Imobiliária"], ["/imoveis", "Imóveis"], ["/anuncie-seu-imovel", "Anuncie seu imóvel"], ["/empreendimentos", "Empreendimentos"], ["/contato", "Contato"]].map(([to, label]) => (
           <NavLink key={to} to={to} onClick={() => setOpen(false)}>{label}</NavLink>
         ))}

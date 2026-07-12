@@ -3,9 +3,11 @@ from django.urls import include, path
 from django.conf import settings
 from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
-from core.views import HealthView
+from core.views import HealthView, robots_txt, sitemap_xml
 
 urlpatterns = [
+    path("robots.txt", robots_txt),
+    path("sitemap.xml", sitemap_xml),
     path("django-admin/", admin.site.urls),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema")),
