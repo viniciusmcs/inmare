@@ -47,7 +47,7 @@ export function Header() {
   }, [open]);
   return (
     <header className={`header ${scrolled ? "scrolled" : ""} ${location.pathname !== "/" ? "inner" : ""}`}>
-      <Link className="brand" to="/"><img src="/assets/brand/logo.jpeg" alt="In Mare" /></Link>
+      <Link className="brand" to="/"><img src="/assets/brand/logo-transparent.png" alt="In Mare" /></Link>
       <button className="menu" type="button" aria-label={open ? "Fechar menu" : "Abrir menu"} aria-controls="site-menu" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? <X /> : <Menu />}</button>
       <nav id="site-menu" className={open ? "open" : ""}>
         {[["/", "Início"], ["/imobiliaria", "A Imobiliária"], ["/imoveis", "Imóveis"], ["/anuncie-seu-imovel", "Anuncie seu imóvel"], ["/empreendimentos", "Empreendimentos"], ["/contato", "Contato"]].map(([to, label]) => (
@@ -62,7 +62,7 @@ export function Header() {
 export function Footer({ settings = {} }: { settings?: SiteSettings }) {
   const socials = [["Instagram", settings.instagram], ["Facebook", settings.facebook], ["LinkedIn", settings.linkedin], ["YouTube", settings.youtube], ["TikTok", settings.tiktok]].filter((item) => item[1]);
   return <footer>
-    <div><img src="/assets/brand/logo.jpeg" alt="In Mare" /><p>Conectando pessoas a imóveis únicos com transparência, segurança e excelência.</p></div>
+    <div><img src="/assets/brand/logo-transparent.png" alt="In Mare" /><p>Conectando pessoas a imóveis únicos com transparência, segurança e excelência.</p></div>
     <div><b>Navegação</b><Link to="/imoveis">Imóveis</Link><Link to="/favoritos">Favoritos</Link><Link to="/anuncie-seu-imovel">Anuncie seu imóvel</Link><Link to="/contato">Contato</Link></div>
     <div><b>Atendimento e redes</b>{settings.phone && <a href={`tel:${settings.phone}`}>{settings.phone}</a>}{settings.email && <a href={`mailto:${settings.email}`}>{settings.email}</a>}{socials.map(([label, url]) => <a key={label} href={url} target="_blank">{label}</a>)}</div>
   </footer>;
@@ -108,16 +108,50 @@ export function MediaCarousel({ media, title }: { media: Media[]; title: string 
   const [index, setIndex] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { const fn = () => setFullscreen(document.fullscreenElement === ref.current); document.addEventListener("fullscreenchange", fn); return () => document.removeEventListener("fullscreenchange", fn); }, []);
+  useEffect(() => {
+    const onFullscreenChange = () => setFullscreen(document.fullscreenElement === ref.current);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && fullscreen && !document.fullscreenElement) setFullscreen(false);
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [fullscreen]);
+  useEffect(() => {
+    if (!fullscreen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [fullscreen]);
   if (!items.length) return <img className="modal-hero" src={fallback} alt={title} />;
   const current = items[index];
   const next = items[(index + 1) % items.length];
   const move = (amount: number) => setIndex((value) => (value + amount + items.length) % items.length);
+  const toggleFullscreen = async () => {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      return;
+    }
+    if (fullscreen) {
+      setFullscreen(false);
+      return;
+    }
+    try {
+      if (!ref.current?.requestFullscreen) throw new Error("Fullscreen API unavailable");
+      await ref.current.requestFullscreen();
+      setFullscreen(true);
+    } catch {
+      setFullscreen(true);
+    }
+  };
   return <div className={`detail-gallery ${fullscreen ? "is-fullscreen" : ""}`} ref={ref}>
     <div className="gallery-main">{current.kind === "video" ? <video src={current.url} controls playsInline /> : <img src={current.url} alt={current.caption || title} />}
       {current.kind === "video" && <span className="video-badge"><Play /> Vídeo</span>}
       <button className="carousel-prev" onClick={() => move(-1)}><ChevronLeft /></button><button className="carousel-next" onClick={() => move(1)}><ChevronRight /></button>
-      <button className="carousel-fullscreen" onClick={() => document.fullscreenElement ? document.exitFullscreen() : ref.current?.requestFullscreen()}>{fullscreen ? <X /> : <Expand />} {fullscreen ? "Sair" : "Tela cheia"}</button>
+      <button type="button" className="carousel-fullscreen" aria-label={fullscreen ? "Sair da tela cheia" : "Abrir em tela cheia"} onClick={toggleFullscreen}>{fullscreen ? <X /> : <Expand />} {fullscreen ? "Sair" : "Tela cheia"}</button>
     </div>
     <button className="gallery-next" onClick={() => move(1)}>{next.kind === "video" ? <video src={next.url} /> : <img src={next.url} alt="" />}<span>{index + 1}/{items.length} <ChevronRight /></span></button>
   </div>;

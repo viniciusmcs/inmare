@@ -45,7 +45,7 @@ export function organizationSchema() {
     "@type": "RealEstateAgent",
     name: siteName,
     url: absoluteUrl("/"),
-    logo: absoluteUrl("/assets/brand/logo.jpeg"),
+    logo: absoluteUrl("/assets/brand/logo-transparent.png"),
     image: absoluteUrl(defaultImage),
     areaServed: "Brasil",
   };

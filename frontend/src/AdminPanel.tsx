@@ -582,7 +582,7 @@ export default function AdminPanel() {
           {adminMenuOpen ? <X /> : <Menu />}
           <span>Menu do painel</span>
         </button>
-        <img src="/assets/brand/logo.jpeg" alt="In Mare" />
+        <img src="/assets/brand/logo-transparent.png" alt="In Mare" />
         <nav id="admin-panel-nav">
           <button onClick={() => { setSection("properties"); setSelected(null); setAdminMenuOpen(false); }}>
             <Building2 /> Imóveis
@@ -1089,7 +1089,7 @@ function Login({
           });
         }}
       >
-        <img src="/assets/brand/logo.jpeg" />
+        <img src="/assets/brand/logo-transparent.png" alt="In Mare" />
         <h1>Acesso administrativo</h1>
         <label>
           Usuário
