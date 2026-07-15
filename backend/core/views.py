@@ -7,6 +7,7 @@ from django.conf import settings as django_settings
 from django.db import connection, transaction
 from django.db.models import Max, Min, Q
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 from datetime import timedelta
 from django.utils import timezone
 from rest_framework import mixins, permissions, status, viewsets
@@ -243,6 +244,28 @@ class AdminPropertyViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         prop = serializer.save()
         AuditEvent.objects.create(actor=self.request.user, action="property.updated", entity_type="Property", entity_id=str(prop.id))
+    def destroy(self, request, *args, **kwargs):
+        prop = self.get_object()
+        property_id = str(prop.id)
+        stored_files = [
+            (media.file.storage, media.file.name)
+            for media in prop.media.all()
+            if media.file and media.file.name
+        ]
+        with transaction.atomic():
+            AuditEvent.objects.create(
+                actor=request.user,
+                action="property.deleted",
+                entity_type="Property",
+                entity_id=property_id,
+                metadata={"media_count": len(stored_files)},
+            )
+            prop.delete()
+            for file_storage, file_name in stored_files:
+                transaction.on_commit(
+                    lambda storage=file_storage, name=file_name: storage.delete(name)
+                )
+        return Response(status=status.HTTP_204_NO_CONTENT)
     @action(detail=False, methods=["post"], url_path="txt-preview")
     def txt_preview(self, request):
         upload = request.FILES.get("file")
@@ -264,16 +287,74 @@ class AdminPropertyViewSet(viewsets.ModelViewSet):
         kinds = {".jpg": Media.Kind.IMAGE, ".jpeg": Media.Kind.IMAGE, ".png": Media.Kind.IMAGE, ".webp": Media.Kind.IMAGE, ".mp4": Media.Kind.VIDEO, ".pdf": Media.Kind.DOCUMENT}
         if extension not in kinds: raise ValidationError({"file": "Formato não permitido."})
         if upload.size > 300 * 1024 * 1024: raise ValidationError({"file": "Arquivo excede 300 MB."})
+        allowed_mime_types = {
+            ".jpg": {"image/jpeg"}, ".jpeg": {"image/jpeg"},
+            ".png": {"image/png"}, ".webp": {"image/webp"},
+            ".mp4": {"video/mp4"}, ".pdf": {"application/pdf"},
+        }
+        mime_type = upload.content_type or mimetypes.guess_type(upload.name)[0] or ""
+        if mime_type.lower() not in allowed_mime_types[extension]:
+            raise ValidationError({"file": "O tipo do arquivo não corresponde à extensão."})
+        signature = upload.read(16)
+        upload.seek(0)
+        valid_signature = {
+            ".jpg": signature.startswith(b"\xff\xd8\xff"),
+            ".jpeg": signature.startswith(b"\xff\xd8\xff"),
+            ".png": signature.startswith(b"\x89PNG\r\n\x1a\n"),
+            ".webp": signature.startswith(b"RIFF") and signature[8:12] == b"WEBP",
+            ".mp4": signature[4:8] == b"ftyp",
+            ".pdf": signature.startswith(b"%PDF-"),
+        }[extension]
+        if not valid_signature:
+            raise ValidationError({"file": "A assinatura do arquivo é inválida ou está corrompida."})
         digest = hashlib.sha256()
         for chunk in upload.chunks(): digest.update(chunk)
         upload.seek(0)
         if prop.media.filter(sha256=digest.hexdigest()).exists(): raise ValidationError({"file": "Arquivo duplicado."})
         kind = kinds[extension]
         primary = kind == Media.Kind.IMAGE and not prop.media.filter(kind=Media.Kind.IMAGE, is_primary=True).exists()
-        media = Media.objects.create(property=prop, kind=kind, file=upload, is_primary=primary, sha256=digest.hexdigest(), mime_type=upload.content_type or mimetypes.guess_type(upload.name)[0] or "application/octet-stream", size=upload.size, status=Media.Status.READY, position=prop.media.count())
+        media = Media.objects.create(property=prop, kind=kind, file=upload, is_primary=primary, sha256=digest.hexdigest(), mime_type=mime_type, size=upload.size, status=Media.Status.READY, position=prop.media.count())
         AuditEvent.objects.create(actor=request.user, action="property.media_uploaded", entity_type="Property", entity_id=str(prop.id), metadata={"kind": kind})
         from .serializers import MediaSerializer
         return Response(MediaSerializer(media, context={"request": request}).data, status=status.HTTP_201_CREATED)
+    @action(detail=True, methods=["delete"], url_path=r"media/(?P<media_id>[^/.]+)")
+    def delete_media(self, request, pk=None, media_id=None):
+        prop = self.get_object()
+        media = get_object_or_404(prop.media.all(), pk=media_id)
+        file_name = media.file.name if media.file else ""
+        file_storage = media.file.storage if media.file else None
+        was_primary = media.kind == Media.Kind.IMAGE and media.is_primary
+        deleted_kind = media.kind
+        deleted_id = str(media.id)
+
+        with transaction.atomic():
+            media.delete()
+            remaining_media = list(prop.media.order_by("position", "created_at"))
+            for position, item in enumerate(remaining_media):
+                if item.position != position:
+                    prop.media.filter(pk=item.pk).update(position=position)
+            if was_primary:
+                next_image = next(
+                    (
+                        item for item in remaining_media
+                        if item.kind == Media.Kind.IMAGE and item.status == Media.Status.READY
+                    ),
+                    None,
+                )
+                if next_image:
+                    prop.media.filter(pk=next_image.pk).update(is_primary=True)
+            AuditEvent.objects.create(
+                actor=request.user,
+                action="property.media_deleted",
+                entity_type="Property",
+                entity_id=str(prop.id),
+                metadata={"media_id": deleted_id, "kind": deleted_kind, "was_primary": was_primary},
+            )
+            if file_name and file_storage:
+                transaction.on_commit(lambda: file_storage.delete(file_name))
+
+        prop._prefetched_objects_cache = {}
+        return Response(self.get_serializer(prop).data)
     @action(detail=True, methods=["post"], url_path="media/(?P<media_id>[^/.]+)/primary")
     def set_primary_media(self, request, pk=None, media_id=None):
         prop = self.get_object()

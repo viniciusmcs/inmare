@@ -512,6 +512,36 @@ export default function AdminPanel() {
       setError(friendlyApiError(primaryError));
     }
   };
+  const deleteMedia = async (mediaId: string) => {
+    if (!selected?.id) return;
+    try {
+      const response = await api.delete<Property>(
+        `/admin/properties/${selected.id}/media/${mediaId}/`,
+      );
+      setSelected(response.data);
+      setNotice("Mídia excluída com sucesso.");
+      setError("");
+      refresh();
+    } catch (deleteError) {
+      setNotice("");
+      setError(friendlyApiError(deleteError));
+      throw deleteError;
+    }
+  };
+  const deleteProperty = async () => {
+    if (!selected?.id) return;
+    try {
+      await api.delete(`/admin/properties/${selected.id}/`);
+      setSelected(null);
+      setNotice("Imóvel excluído definitivamente.");
+      setError("");
+      refresh();
+    } catch (deleteError) {
+      setNotice("");
+      setError(friendlyApiError(deleteError));
+      throw deleteError;
+    }
+  };
   const importTxt = async (file: File) => {
     try {
       const data = new FormData();
@@ -764,6 +794,8 @@ export default function AdminPanel() {
             upload={upload}
             reorder={reorder}
             setPrimary={setPrimary}
+            deleteMedia={deleteMedia}
+            deleteProperty={deleteProperty}
             importTxt={importTxt}
             action={(name) =>
               selected.id && action.mutate({ id: selected.id, name })
@@ -1120,6 +1152,8 @@ function Editor({
   upload,
   reorder,
   setPrimary,
+  deleteMedia,
+  deleteProperty,
   importTxt,
   action,
   back,
@@ -1129,9 +1163,11 @@ function Editor({
   setForm: (v: Record<string, string | boolean>) => void;
   selected: Property;
   save: () => void;
-  upload: (f: File) => void;
+  upload: (f: File) => Promise<void>;
   reorder: (draggedId: string, targetId: string) => void;
   setPrimary: (mediaId: string) => void;
+  deleteMedia: (mediaId: string) => Promise<void>;
+  deleteProperty: () => Promise<void>;
   importTxt: (file: File) => void;
   action: (n: string) => void;
   back: () => void;
@@ -1140,8 +1176,13 @@ function Editor({
   const [saleConfirmation, setSaleConfirmation] = useState<"sell" | "restore" | null>(null);
   const [archiveConfirmation, setArchiveConfirmation] = useState<"archive" | "restore" | null>(null);
   const [draggingMedia, setDraggingMedia] = useState<string | null>(null);
-  const uploadFiles = (files: FileList | File[]) =>
-    Array.from(files).forEach(upload);
+  const [deletingMedia, setDeletingMedia] = useState<string | null>(null);
+  const [mediaDeleteConfirmation, setMediaDeleteConfirmation] = useState<{ id: string; kind: string } | null>(null);
+  const [propertyDeleteConfirmation, setPropertyDeleteConfirmation] = useState(false);
+  const [deletingProperty, setDeletingProperty] = useState(false);
+  const uploadFiles = async (files: FileList | File[]) => {
+    for (const file of Array.from(files)) await upload(file);
+  };
   const field = (name: string, label: string, type = "text", required = false) => (
     <label>
       <span>
@@ -1291,6 +1332,12 @@ function Editor({
               {selected.status === "archived" ? <ArchiveRestore /> : <Archive />}
               {selected.status === "archived" ? "Arquivado — restaurar" : "Arquivar imóvel"}
             </button>
+            <button
+              className="outline danger-action"
+              onClick={() => setPropertyDeleteConfirmation(true)}
+            >
+              <Trash2 /> Excluir imóvel
+            </button>
           </>
         )}
       </div>
@@ -1301,9 +1348,9 @@ function Editor({
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
             event.preventDefault();
-            uploadFiles(event.dataTransfer.files);
+            void uploadFiles(event.dataTransfer.files);
           }}
-          onPaste={(event) => uploadFiles(event.clipboardData.files)}
+          onPaste={(event) => { void uploadFiles(event.clipboardData.files); }}
         >
           <ImagePlus />
           <span>
@@ -1314,7 +1361,7 @@ function Editor({
             type="file"
             multiple
             accept="image/jpeg,image/png,image/webp,video/mp4,application/pdf"
-            onChange={(event) => uploadFiles(event.target.files ?? [])}
+            onChange={(event) => { void uploadFiles(event.target.files ?? []); }}
           />
         </label>
       )}
@@ -1354,6 +1401,16 @@ function Editor({
                   <Star />
                 </button>
               )}
+              <button
+                type="button"
+                className={`media-delete ${m.kind === "image" ? "beside-star" : ""}`}
+                disabled={deletingMedia === m.id}
+                onClick={() => setMediaDeleteConfirmation({ id: m.id, kind: m.kind })}
+                title="Excluir mídia"
+                aria-label={m.kind === "image" ? "Excluir foto" : "Excluir mídia"}
+              >
+                <Trash2 />
+              </button>
               {m.kind === "image" ? (
                 <img src={m.url} />
               ) : m.kind === "video" ? (
@@ -1371,6 +1428,71 @@ function Editor({
           ))}
         </div>
       ) : null}
+      {mediaDeleteConfirmation && (
+        <div className="confirm-backdrop">
+          <div className="confirm-modal delete-confirm" role="alertdialog" aria-modal="true">
+            <Trash2 />
+            <h2>{mediaDeleteConfirmation.kind === "image" ? "Excluir esta foto?" : "Excluir esta mídia?"}</h2>
+            <p>
+              {mediaDeleteConfirmation.kind === "image"
+                ? "A foto será removida permanentemente deste imóvel. Se ela for a principal, a próxima foto será definida como principal."
+                : "Este arquivo será removido permanentemente do imóvel."}
+            </p>
+            <div>
+              <button className="outline" onClick={() => setMediaDeleteConfirmation(null)} disabled={deletingMedia !== null}>
+                Cancelar
+              </button>
+              <button
+                className="confirm-delete"
+                disabled={deletingMedia !== null}
+                onClick={async () => {
+                  const mediaId = mediaDeleteConfirmation.id;
+                  setDeletingMedia(mediaId);
+                  try {
+                    await deleteMedia(mediaId);
+                    setMediaDeleteConfirmation(null);
+                  } finally {
+                    setDeletingMedia(null);
+                  }
+                }}
+              >
+                <Trash2 /> {deletingMedia ? "Excluindo..." : "Sim, excluir"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {propertyDeleteConfirmation && (
+        <div className="confirm-backdrop">
+          <div className="confirm-modal delete-confirm" role="alertdialog" aria-modal="true">
+            <Trash2 />
+            <h2>Excluir este imóvel?</h2>
+            <p>
+              <b>{selected.title}</b> e todas as fotos, vídeos, documentos e informações cadastradas serão removidos permanentemente. Esta ação não pode ser desfeita.
+            </p>
+            <div>
+              <button className="outline" onClick={() => setPropertyDeleteConfirmation(false)} disabled={deletingProperty}>
+                Cancelar
+              </button>
+              <button
+                className="confirm-delete"
+                disabled={deletingProperty}
+                onClick={async () => {
+                  setDeletingProperty(true);
+                  try {
+                    await deleteProperty();
+                    setPropertyDeleteConfirmation(false);
+                  } finally {
+                    setDeletingProperty(false);
+                  }
+                }}
+              >
+                <Trash2 /> {deletingProperty ? "Excluindo..." : "Sim, excluir imóvel"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {saleConfirmation && (
         <div className="confirm-backdrop">
           <div className="confirm-modal" role="dialog" aria-modal="true">

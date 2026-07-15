@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from core.models import FrequentlyAskedQuestion, HeroSlide, InstitutionalImage, Lead, Media, Property, SiteSettings, Testimonial as CustomerTestimonial
+from core.models import AuditEvent, FrequentlyAskedQuestion, HeroSlide, InstitutionalImage, Lead, Media, Property, SiteSettings, Testimonial as CustomerTestimonial
 from core.services import extract_property_description, import_property_folder, validate_and_extract_zip
 
 pytestmark = pytest.mark.django_db
@@ -127,6 +127,18 @@ def test_admin_can_upload_property_media():
     assert response.data["kind"] == "image"
     assert response.data["url"].startswith("/media/")
 
+def test_admin_rejects_image_with_invalid_signature():
+    admin = get_user_model().objects.create_superuser("invalid-upload-admin", "invalid-upload@example.com", "secret")
+    prop = Property.objects.create(title="Casa Upload Inválido", slug="casa-upload-invalido", city="X", neighborhood="Y")
+    client = APIClient()
+    client.force_authenticate(admin)
+    upload = SimpleUploadedFile("foto.jpg", b"not-a-real-jpeg", content_type="image/jpeg")
+
+    response = client.post(f"/api/v1/admin/properties/{prop.id}/media/", {"file": upload}, format="multipart")
+
+    assert response.status_code == 400
+    assert not prop.media.exists()
+
 def test_admin_can_reorder_media_and_set_primary_image():
     admin = get_user_model().objects.create_superuser("media-admin", "media@example.com", "secret")
     prop = Property.objects.create(title="Casa Mídias", slug="casa-midias", city="X", neighborhood="Y")
@@ -147,6 +159,65 @@ def test_admin_can_reorder_media_and_set_primary_image():
     primary = client.post(f"/api/v1/admin/properties/{prop.id}/media/{last.id}/primary/")
     assert primary.status_code == 200
     assert next(item for item in primary.data["media"] if item["id"] == str(last.id))["is_primary"] is True
+
+def test_admin_can_delete_media_and_next_image_becomes_primary():
+    admin = get_user_model().objects.create_superuser("delete-media-admin", "delete-media@example.com", "secret")
+    prop = Property.objects.create(title="Casa Exclusão", slug="casa-exclusao", city="X", neighborhood="Y")
+    primary = Media.objects.create(property=prop, kind="image", is_primary=True, position=0, sha256="1"*64, mime_type="image/jpeg", status="ready")
+    next_image = Media.objects.create(property=prop, kind="image", position=2, sha256="2"*64, mime_type="image/jpeg", status="ready")
+    video = Media.objects.create(property=prop, kind="video", position=4, sha256="3"*64, mime_type="video/mp4", status="ready")
+    client = APIClient()
+    client.force_authenticate(admin)
+
+    response = client.delete(f"/api/v1/admin/properties/{prop.id}/media/{primary.id}/")
+
+    assert response.status_code == 200
+    assert not Media.objects.filter(pk=primary.id).exists()
+    next_image.refresh_from_db()
+    video.refresh_from_db()
+    assert next_image.is_primary is True
+    assert [next_image.position, video.position] == [0, 1]
+    assert [item["id"] for item in response.data["media"]] == [str(next_image.id), str(video.id)]
+
+def test_admin_cannot_delete_media_from_another_property():
+    admin = get_user_model().objects.create_superuser("scoped-media-admin", "scoped-media@example.com", "secret")
+    prop = Property.objects.create(title="Casa A", slug="casa-a", city="X", neighborhood="Y")
+    another = Property.objects.create(title="Casa B", slug="casa-b", city="X", neighborhood="Y")
+    media = Media.objects.create(property=another, kind="image", is_primary=True, position=0, sha256="4"*64, mime_type="image/jpeg", status="ready")
+    client = APIClient()
+    client.force_authenticate(admin)
+
+    response = client.delete(f"/api/v1/admin/properties/{prop.id}/media/{media.id}/")
+
+    assert response.status_code == 404
+    assert Media.objects.filter(pk=media.id).exists()
+
+def test_admin_can_delete_property_and_its_media():
+    admin = get_user_model().objects.create_superuser("delete-property-admin", "delete-property@example.com", "secret")
+    prop = Property.objects.create(title="Casa para excluir", slug="casa-para-excluir", city="X", neighborhood="Y")
+    media = Media.objects.create(property=prop, kind="image", is_primary=True, position=0, sha256="5"*64, mime_type="image/jpeg", status="ready")
+    property_id = prop.id
+    media_id = media.id
+    client = APIClient()
+    client.force_authenticate(admin)
+
+    response = client.delete(f"/api/v1/admin/properties/{property_id}/")
+
+    assert response.status_code == 204
+    assert not Property.objects.filter(pk=property_id).exists()
+    assert not Media.objects.filter(pk=media_id).exists()
+    assert AuditEvent.objects.filter(action="property.deleted", entity_id=str(property_id)).exists()
+
+def test_non_admin_cannot_delete_property():
+    user = get_user_model().objects.create_user("regular-user", "regular@example.com", "secret")
+    prop = Property.objects.create(title="Casa protegida", slug="casa-protegida", city="X", neighborhood="Y")
+    client = APIClient()
+    client.force_authenticate(user)
+
+    response = client.delete(f"/api/v1/admin/properties/{prop.id}/")
+
+    assert response.status_code == 403
+    assert Property.objects.filter(pk=prop.id).exists()
 
 def test_login_ignores_stale_access_cookie():
     get_user_model().objects.create_superuser("cookie-admin", "cookie@example.com", "admin")
