@@ -192,7 +192,7 @@ class PublicContentView(APIView):
     authentication_classes = []
     def get(self, request):
         return Response({
-            "hero_slides": HeroSlideSerializer(HeroSlide.objects.filter(active=True), many=True).data,
+            "hero_slides": HeroSlideSerializer(HeroSlide.objects.filter(active=True)[:12], many=True).data,
             "testimonials": TestimonialSerializer(Testimonial.objects.filter(active=True), many=True).data,
             "faqs": FrequentlyAskedQuestionSerializer(FrequentlyAskedQuestion.objects.filter(active=True), many=True).data,
             "institutional_images": InstitutionalImageSerializer(InstitutionalImage.objects.filter(active=True), many=True).data,

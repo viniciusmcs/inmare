@@ -98,6 +98,17 @@ class HeroSlideSerializer(serializers.ModelSerializer):
     active = serializers.BooleanField(default=True)
     class Meta: model = HeroSlide; fields = "__all__"
     def get_image_src(self, obj): return obj.image.url if obj.image else obj.image_url
+    def validate(self, attrs):
+        if self.instance is None and HeroSlide.objects.count() >= 12:
+            raise serializers.ValidationError("O Header permite no máximo 12 imagens no total.")
+        active = attrs.get("active", self.instance.active if self.instance else True)
+        if active:
+            active_slides = HeroSlide.objects.filter(active=True)
+            if self.instance:
+                active_slides = active_slides.exclude(pk=self.instance.pk)
+            if active_slides.count() >= 12:
+                raise serializers.ValidationError({"active": "O Header permite no máximo 12 imagens ativas."})
+        return attrs
     def validate_image(self, image):
         if image and image.size > 12 * 1024 * 1024:
             raise serializers.ValidationError("A imagem deve ter no máximo 12 MB.")

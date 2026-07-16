@@ -482,6 +482,33 @@ def test_public_content_only_exposes_active_items():
     assert response.data["testimonials"][0]["name"] == "Cliente"
     assert response.data["faqs"][0]["question"] == "Como anunciar?"
 
+def test_public_content_limits_header_to_twelve():
+    for index in range(13):
+        HeroSlide.objects.create(
+            title=f"Slide {index}",
+            image_url=f"https://example.com/hero-{index}.jpg",
+            position=index,
+        )
+    response = APIClient().get("/api/v1/public/content/")
+    assert response.status_code == 200
+    assert len(response.data["hero_slides"]) == 12
+    assert [item["title"] for item in response.data["hero_slides"]] == [f"Slide {index}" for index in range(12)]
+
+
+def test_admin_cannot_create_thirteenth_active_header_slide():
+    admin = get_user_model().objects.create_superuser("header-admin", "header@example.com", "secret")
+    for index in range(12):
+        HeroSlide.objects.create(title=f"Slide {index}", image_url=f"https://example.com/hero-{index}.jpg")
+    client = APIClient()
+    client.force_authenticate(admin)
+    response = client.post(
+        "/api/v1/admin/hero-slides/",
+        {"title": "Slide excedente", "image_url": "https://example.com/excess.jpg", "active": True},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "máximo 12" in str(response.data["non_field_errors"][0])
+
 def test_admin_can_upload_testimonial_photo_and_public_content_exposes_it():
     admin = get_user_model().objects.create_superuser("content-admin", "content@example.com", "secret")
     image = SimpleUploadedFile(
