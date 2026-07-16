@@ -3,7 +3,7 @@ import { useEffect } from "react";
 const siteName = "In Mare Negocios Imobiliarios";
 const defaultDescription =
   "Imoveis para comprar, vender e investir com atendimento consultivo, seguranca e curadoria especializada da In Mare Negocios Imobiliarios.";
-const defaultImage = "/assets/brand/imobiliaria4.jpg";
+const defaultImage = "/assets/brand/share-logo-20260716.jpeg";
 
 type SeoProps = {
   title?: string;
@@ -73,10 +73,14 @@ export function Seo({
     upsertMeta('meta[property="og:type"]', { property: "og:type", content: type });
     upsertMeta('meta[property="og:url"]', { property: "og:url", content: canonical });
     upsertMeta('meta[property="og:image"]', { property: "og:image", content: imageUrl });
+    upsertMeta('meta[property="og:image:secure_url"]', { property: "og:image:secure_url", content: imageUrl });
+    upsertMeta('meta[property="og:image:type"]', { property: "og:image:type", content: "image/jpeg" });
+    upsertMeta('meta[property="og:image:alt"]', { property: "og:image:alt", content: `Logo da ${siteName}` });
     upsertMeta('meta[name="twitter:card"]', { name: "twitter:card", content: "summary_large_image" });
     upsertMeta('meta[name="twitter:title"]', { name: "twitter:title", content: fullTitle });
     upsertMeta('meta[name="twitter:description"]', { name: "twitter:description", content: description });
     upsertMeta('meta[name="twitter:image"]', { name: "twitter:image", content: imageUrl });
+    upsertMeta('meta[name="twitter:image:alt"]', { name: "twitter:image:alt", content: `Logo da ${siteName}` });
     upsertLink("canonical", canonical);
 
     document.querySelectorAll('script[data-seo-json="true"]').forEach((item) => item.remove());
