@@ -856,7 +856,7 @@ export default function AdminPanel() {
                 )}
               </div>
               {!!filteredList.length && (
-                <nav className="admin-pagination" aria-label="Paginação dos imóveis">
+                <div className="admin-pagination" role="navigation" aria-label="Paginação dos imóveis">
                   <span>
                     Exibindo {(activePropertyPage - 1) * propertiesPerPage + 1}–{Math.min(activePropertyPage * propertiesPerPage, filteredList.length)} de {filteredList.length}
                   </span>
@@ -889,7 +889,7 @@ export default function AdminPanel() {
                       Próxima
                     </button>
                   </div>
-                </nav>
+                </div>
               )}
             </section>
           </>
@@ -1241,14 +1241,14 @@ function Login({
         <h1>Acesso administrativo</h1>
         <label>
           Usuário
-          <input name="username" defaultValue="admin" required />
+          <input name="username" autoComplete="username" required />
         </label>
         <label>
           Senha
           <input
             name="password"
             type="password"
-            defaultValue="admin"
+            autoComplete="current-password"
             required
           />
         </label>

@@ -11,12 +11,39 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from core.models import AuditEvent, FrequentlyAskedQuestion, HeroSlide, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial as CustomerTestimonial
 from core.media_utils import normalize_uploaded_image
 from core.services import extract_property_description, import_property_folder, validate_and_extract_zip
 
 pytestmark = pytest.mark.django_db
+
+def test_seed_demo_does_not_create_default_admin(monkeypatch):
+    monkeypatch.delenv("DJANGO_SUPERUSER_USERNAME", raising=False)
+    monkeypatch.delenv("DJANGO_SUPERUSER_PASSWORD", raising=False)
+    call_command("seed_demo")
+    assert not get_user_model().objects.filter(username="admin").exists()
+
+def test_seed_demo_creates_only_configured_admin(monkeypatch):
+    monkeypatch.setenv("DJANGO_SUPERUSER_USERNAME", "configured-admin")
+    monkeypatch.setenv("DJANGO_SUPERUSER_PASSWORD", "Strong-test-password-2620")
+    call_command("seed_demo")
+    user = get_user_model().objects.get(username="configured-admin")
+    assert user.is_active and user.is_staff and user.is_superuser
+    assert user.check_password("Strong-test-password-2620")
+
+def test_seed_demo_does_not_reset_existing_admin_password(monkeypatch):
+    user = get_user_model().objects.create_user(
+        username="configured-admin",
+        password="Existing-strong-password-2620",
+    )
+    monkeypatch.setenv("DJANGO_SUPERUSER_USERNAME", "configured-admin")
+    monkeypatch.setenv("DJANGO_SUPERUSER_PASSWORD", "Different-password-2620")
+    monkeypatch.delenv("DJANGO_SUPERUSER_RESET_PASSWORD", raising=False)
+    call_command("seed_demo")
+    user.refresh_from_db()
+    assert user.check_password("Existing-strong-password-2620")
 
 def test_parser_extracts_without_inventing():
     result = extract_property_description("Casa\n03 dormitórios, 01 Suíte\nR$ 780.000,00\nBairro: Marina\nNão aceita imóveis")
