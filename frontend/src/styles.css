@@ -611,3 +611,28 @@ footer img{width:176px;height:154px;object-fit:contain;object-position:left cent
   .listing-section>.property-grid>.property-card{flex:0 0 min(82vw,330px);scroll-snap-align:start}
   .listing-section>.property-grid .card-image{height:205px}
 }
+
+/* Navegação minimalista da Home em qualquer tela */
+body.menu-open{overflow:hidden}
+.header .brand{position:relative;z-index:45}
+.header:not(.inner),.header.scrolled:not(.inner){background:transparent;box-shadow:none}
+.header:not(.inner) .brand{position:absolute;left:50%;top:7px;transform:translateX(-50%);z-index:45}
+.header:not(.inner) .brand img{width:128px;height:82px;object-fit:contain;border-radius:0}
+.header:not(.inner) .menu{display:grid;place-items:center;margin-left:auto;width:46px;height:46px;background:transparent;border:0;box-shadow:none;color:#fff;filter:drop-shadow(0 2px 5px #000);position:relative;z-index:46}
+.header:not(.inner) nav{position:fixed;inset:0;display:flex;flex-direction:column;align-items:flex-start;gap:0;margin:0;padding:138px max(9vw,36px) 48px;background:#02080e;transform:translateX(100%);opacity:0;pointer-events:none;transition:transform .24s ease,opacity .2s ease;overflow-y:auto;z-index:43}
+.header:not(.inner) nav.open{transform:translateX(0);opacity:1;pointer-events:auto}
+.header:not(.inner) nav a{display:flex;align-items:center;justify-content:space-between;width:min(560px,100%);min-height:62px;padding:0 10px;border-bottom:1px solid #ffffff18;font-size:18px}
+.header:not(.inner) nav a.active,.header:not(.inner) nav a:hover{color:var(--gold2);border-color:#ffffff18}
+.header:not(.inner) nav .favorite-nav{margin-top:18px;padding:0 16px;border:1px solid #ffffff26;border-radius:8px;background:#ffffff0a}
+.hero-search-bar.search-bar{background:#03162a29;border-color:#ffffff1f;backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.hero-search-bar.search-bar select,.hero-search-bar.search-bar input{background:#071b2e24}
+
+@media(max-width:900px){
+  .header nav{top:0;bottom:0;padding-top:112px;background:#02080e}
+  .header .brand{z-index:45}
+  .header .menu{z-index:46}
+  .header:not(.inner) .brand{top:3px}
+  .header:not(.inner) .brand img{width:112px;height:70px}
+  .header:not(.inner) nav{padding:112px 24px 36px}
+  .header:not(.inner) nav a{width:100%;min-height:58px;font-size:17px}
+}
