@@ -563,7 +563,7 @@ footer img{width:176px;height:154px;object-fit:contain;object-position:left cent
 }
 @media(max-width:680px){
   .home-video-hero{min-height:760px;height:max(100svh,760px)}
-  .hero-background-video{object-position:center}
+  .hero-background-video{object-fit:contain;object-position:center;background:#061b32}
   .hero-video-shade{background:linear-gradient(180deg,#03162a8c 0%,#03162a24 25%,#03162a66 50%,#03162ae8 100%)}
   .hero-video-copy{top:18%;width:calc(100% - 32px)}
   .hero-video-copy small{font-size:10px}
