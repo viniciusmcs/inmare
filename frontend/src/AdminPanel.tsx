@@ -389,6 +389,15 @@ export default function AdminPanel() {
     setError("");
     return response.data;
   };
+  const deleteListingOption = async (id: string) => {
+    await api.delete(`/admin/listing-options/${id}/`);
+    queryClient.setQueryData<ListingOption[]>(
+      ["admin-listing-options"],
+      (current = []) => current.filter((option) => option.id !== id),
+    );
+    setNotice("Nome excluído do catálogo.");
+    setError("");
+  };
   const save = useMutation({
     mutationFn: async () => {
       const requiredFields: Record<string, string> = {
@@ -913,6 +922,7 @@ export default function AdminPanel() {
             listingOptions={listingOptions.data ?? []}
             createListingOption={createListingOption}
             updateListingOption={updateListingOption}
+            deleteListingOption={deleteListingOption}
           />
         )}
       </main>
@@ -1334,6 +1344,7 @@ function Editor({
   listingOptions,
   createListingOption,
   updateListingOption,
+  deleteListingOption,
 }: {
   form: Record<string, string | boolean>;
   setForm: (v: Record<string, string | boolean>) => void;
@@ -1356,6 +1367,7 @@ function Editor({
     id: string,
     input: Pick<ListingOption, "name" | "city">,
   ) => Promise<ListingOption>;
+  deleteListingOption: (id: string) => Promise<void>;
 }) {
   const [saleConfirmation, setSaleConfirmation] = useState<"sell" | "restore" | null>(null);
   const [archiveConfirmation, setArchiveConfirmation] = useState<"archive" | "restore" | null>(null);
@@ -1443,6 +1455,21 @@ function Editor({
           }}
         >
           <Pencil />
+        </button>
+        <button
+          type="button"
+          className="catalog-delete-trigger"
+          disabled={disabled || !selectedOption}
+          aria-label={`Excluir ${label.toLocaleLowerCase("pt-BR")} selecionado`}
+          title={`Excluir ${label.toLocaleLowerCase("pt-BR")} selecionado`}
+          onClick={() => {
+            if (!selectedOption) return;
+            setOptionDialog({ field: name, label, option: selectedOption });
+            setNewOptionName(selectedOption.name);
+            setOptionError("");
+          }}
+        >
+          <Trash2 />
         </button>
         <button
           type="button"
@@ -1755,6 +1782,32 @@ function Editor({
             </label>
             {optionError && <p className="form-error">{optionError}</p>}
             <div>
+              {optionDialog.option && (
+                <button
+                  type="button"
+                  className="confirm-delete catalog-delete"
+                  disabled={creatingOption}
+                  onClick={async () => {
+                    if (!window.confirm(`Excluir “${optionDialog.option?.name}” do catálogo?`)) return;
+                    setCreatingOption(true);
+                    setOptionError("");
+                    try {
+                      await deleteListingOption(optionDialog.option!.id);
+                      const nextForm = { ...form, [optionDialog.field]: "" };
+                      if (optionDialog.field === "city") nextForm.neighborhood = "";
+                      setForm(nextForm);
+                      setOptionDialog(null);
+                      setNewOptionName("");
+                    } catch (deleteError) {
+                      setOptionError(friendlyApiError(deleteError));
+                    } finally {
+                      setCreatingOption(false);
+                    }
+                  }}
+                >
+                  <Trash2 /> Excluir nome
+                </button>
+              )}
               <button
                 type="button"
                 className="outline"

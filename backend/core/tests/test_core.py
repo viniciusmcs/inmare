@@ -218,6 +218,33 @@ def test_admin_cannot_rename_catalog_option_to_duplicate():
     city.refresh_from_db()
     assert city.name == "Xangri-Lá"
 
+def test_admin_can_delete_unused_catalog_option():
+    admin = get_user_model().objects.create_superuser("catalog-delete", "catalog-delete@example.com", "secret")
+    client = APIClient()
+    client.force_authenticate(admin)
+    option = ListingOption.objects.create(kind=ListingOption.Kind.PROPERTY_TYPE, name="Loft")
+    response = client.delete(f"/api/v1/admin/listing-options/{option.id}/")
+    assert response.status_code == 204
+    assert not ListingOption.objects.filter(pk=option.id).exists()
+    assert AuditEvent.objects.filter(action="listing_option.deleted", entity_id=str(option.id)).exists()
+
+def test_admin_cannot_delete_catalog_option_in_use():
+    admin = get_user_model().objects.create_superuser("catalog-delete-blocked", "catalog-delete-blocked@example.com", "secret")
+    client = APIClient()
+    client.force_authenticate(admin)
+    Property.objects.create(
+        title="Casa vinculada",
+        slug="casa-vinculada-catalogo",
+        property_type="Casa",
+        city="Xangri-Lá",
+        neighborhood="Atlântida",
+    )
+    option = ListingOption.objects.get(kind=ListingOption.Kind.PROPERTY_TYPE, name="Casa")
+    response = client.delete(f"/api/v1/admin/listing-options/{option.id}/")
+    assert response.status_code == 400
+    assert "vinculado" in str(response.data).lower()
+    assert ListingOption.objects.filter(pk=option.id).exists()
+
 
 def test_admin_rejects_property_location_outside_catalog():
     admin = get_user_model().objects.create_superuser("catalog-property-admin", "catalog-property@example.com", "secret")

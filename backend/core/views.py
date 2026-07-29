@@ -238,6 +238,7 @@ class AdminListingOptionViewSet(
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
     mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
     viewsets.GenericViewSet,
 ):
     permission_classes = [permissions.IsAdminUser]
@@ -290,6 +291,48 @@ class AdminListingOptionViewSet(
                     "properties_updated": updated,
                 },
             )
+
+    def destroy(self, request, *args, **kwargs):
+        option = self.get_object()
+        if option.kind == ListingOption.Kind.PROPERTY_TYPE:
+            properties_in_use = Property.objects.filter(property_type__iexact=option.name).count()
+            neighborhoods_in_use = 0
+        elif option.kind == ListingOption.Kind.CITY:
+            properties_in_use = Property.objects.filter(city__iexact=option.name).count()
+            neighborhoods_in_use = ListingOption.objects.filter(
+                kind=ListingOption.Kind.NEIGHBORHOOD,
+                city__iexact=option.name,
+            ).count()
+        else:
+            properties_in_use = Property.objects.filter(
+                city__iexact=option.city,
+                neighborhood__iexact=option.name,
+            ).count()
+            neighborhoods_in_use = 0
+        blockers = []
+        if properties_in_use:
+            blockers.append(f"{properties_in_use} imóvel(is)")
+        if neighborhoods_in_use:
+            blockers.append(f"{neighborhoods_in_use} bairro(s)")
+        if blockers:
+            raise ValidationError({
+                "detail": (
+                    f'Não é possível excluir “{option.name}” porque está vinculado a '
+                    f'{" e ".join(blockers)}. Altere os vínculos antes de excluir.'
+                )
+            })
+        option_id = str(option.id)
+        metadata = {"kind": option.kind, "name": option.name, "city": option.city}
+        with transaction.atomic():
+            option.delete()
+            AuditEvent.objects.create(
+                actor=request.user,
+                action="listing_option.deleted",
+                entity_type="ListingOption",
+                entity_id=option_id,
+                metadata=metadata,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AdminPropertyViewSet(viewsets.ModelViewSet):
