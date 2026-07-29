@@ -1,4 +1,6 @@
 import secrets
+import re
+import unicodedata
 import uuid
 from datetime import timedelta
 from django.conf import settings
@@ -10,6 +12,12 @@ from django.utils import timezone
 
 def public_code():
     return secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:10].upper()
+
+
+def catalog_key(value):
+    normalized = unicodedata.normalize("NFKD", value or "")
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii").casefold()
+    return re.sub(r"[^a-z0-9]+", " ", ascii_value).strip()
 
 
 class TimeStamped(models.Model):
@@ -27,6 +35,43 @@ class Broker(TimeStamped):
     whatsapp = models.CharField(max_length=40, blank=True)
     active = models.BooleanField(default=True)
     def __str__(self): return self.name
+
+
+class ListingOption(TimeStamped):
+    class Kind(models.TextChoices):
+        PROPERTY_TYPE = "property_type", "Tipo de imóvel"
+        CITY = "city", "Cidade"
+        NEIGHBORHOOD = "neighborhood", "Bairro"
+
+    kind = models.CharField(max_length=30, choices=Kind.choices, db_index=True)
+    name = models.CharField(max_length=120)
+    key = models.CharField(max_length=120, editable=False)
+    city = models.CharField(max_length=120, blank=True)
+    city_key = models.CharField(max_length=120, blank=True, editable=False)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["kind", "city", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["kind", "key", "city_key"],
+                name="unique_listing_option",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.name = " ".join(self.name.split())
+        self.key = catalog_key(self.name)
+        if self.kind == self.Kind.NEIGHBORHOOD:
+            self.city = " ".join(self.city.split())
+            self.city_key = catalog_key(self.city)
+        else:
+            self.city = ""
+            self.city_key = ""
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name} ({self.city})" if self.city else self.name
 
 
 class Property(TimeStamped):

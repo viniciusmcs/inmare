@@ -1,8 +1,9 @@
 import re
 from rest_framework import serializers
+from .media_utils import normalize_uploaded_image
 from django.utils import timezone
 from django.utils.text import slugify
-from .models import AuditEvent, Broker, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, Media, Property, SiteSettings, Testimonial
+from .models import AuditEvent, Broker, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial, catalog_key
 
 class MediaSerializer(serializers.ModelSerializer):
     url = serializers.SerializerMethodField()
@@ -37,7 +38,40 @@ class AdminPropertySerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if attrs.get("featured") and not attrs.get("published", getattr(self.instance, "published", False)):
             raise serializers.ValidationError({"featured": "Publique o imóvel antes de destacá-lo."})
+        property_type = attrs.get("property_type", getattr(self.instance, "property_type", "Casa"))
+        city = attrs.get("city", getattr(self.instance, "city", ""))
+        neighborhood = attrs.get("neighborhood", getattr(self.instance, "neighborhood", ""))
+        if self.instance is None or "property_type" in attrs:
+            attrs["property_type"] = self._canonical_option(ListingOption.Kind.PROPERTY_TYPE, property_type)
+        if self.instance is None or "city" in attrs:
+            attrs["city"] = self._canonical_option(ListingOption.Kind.CITY, city)
+            city = attrs["city"]
+        if self.instance is None or "city" in attrs or "neighborhood" in attrs:
+            attrs["neighborhood"] = self._canonical_option(
+                ListingOption.Kind.NEIGHBORHOOD,
+                neighborhood,
+                city=city,
+            )
         return attrs
+    def _canonical_option(self, kind, value, city=""):
+        filters = {
+            "kind": kind,
+            "key": catalog_key(value),
+            "active": True,
+        }
+        if kind == ListingOption.Kind.NEIGHBORHOOD:
+            filters["city_key"] = catalog_key(city)
+        option = ListingOption.objects.filter(**filters).first()
+        if option:
+            return option.name
+        label = dict(ListingOption.Kind.choices)[kind]
+        raise serializers.ValidationError({
+            {
+                ListingOption.Kind.PROPERTY_TYPE: "property_type",
+                ListingOption.Kind.CITY: "city",
+                ListingOption.Kind.NEIGHBORHOOD: "neighborhood",
+            }[kind]: f"{label} não cadastrado. Use o botão + para criar a opção.",
+        })
     def create(self, validated_data):
         validated_data["slug"] = self._unique_slug(validated_data.get("slug") or validated_data["title"])
         return super().create(validated_data)
@@ -56,6 +90,40 @@ class AdminPropertySerializer(serializers.ModelSerializer):
 class DevelopmentSerializer(serializers.ModelSerializer):
     media = MediaSerializer(many=True, read_only=True)
     class Meta: model = Development; fields = "__all__"
+
+
+class ListingOptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ListingOption
+        fields = ("id", "kind", "name", "city", "active")
+        read_only_fields = ("id", "active")
+
+    def validate(self, attrs):
+        kind = attrs["kind"]
+        name = " ".join(attrs["name"].split())
+        if not name:
+            raise serializers.ValidationError({"name": "Informe um nome."})
+        city = ""
+        if kind == ListingOption.Kind.NEIGHBORHOOD:
+            requested_city = attrs.get("city", "")
+            city_option = ListingOption.objects.filter(
+                kind=ListingOption.Kind.CITY,
+                key=catalog_key(requested_city),
+                active=True,
+            ).first()
+            if not city_option:
+                raise serializers.ValidationError({"city": "Selecione uma cidade cadastrada."})
+            city = city_option.name
+        duplicate = ListingOption.objects.filter(
+            kind=kind,
+            key=catalog_key(name),
+            city_key=catalog_key(city),
+        ).first()
+        if duplicate:
+            raise serializers.ValidationError({"name": f'Opção já cadastrada como “{duplicate.name}”.'})
+        attrs["name"] = name
+        attrs["city"] = city
+        return attrs
 
 class LeadSerializer(serializers.ModelSerializer):
     website = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -112,7 +180,7 @@ class HeroSlideSerializer(serializers.ModelSerializer):
     def validate_image(self, image):
         if image and image.size > 12 * 1024 * 1024:
             raise serializers.ValidationError("A imagem deve ter no máximo 12 MB.")
-        return image
+        return normalize_uploaded_image(image, max_bytes=12 * 1024 * 1024)
 class InstitutionalImageSerializer(serializers.ModelSerializer):
     image_src = serializers.SerializerMethodField()
     active = serializers.BooleanField(default=True)
@@ -121,7 +189,7 @@ class InstitutionalImageSerializer(serializers.ModelSerializer):
     def validate_image(self, image):
         if image and image.size > 12 * 1024 * 1024:
             raise serializers.ValidationError("A imagem deve ter no máximo 12 MB.")
-        return image
+        return normalize_uploaded_image(image, max_bytes=12 * 1024 * 1024)
 class TestimonialSerializer(serializers.ModelSerializer):
     photo_src = serializers.SerializerMethodField()
     active = serializers.BooleanField(default=True)
@@ -130,7 +198,7 @@ class TestimonialSerializer(serializers.ModelSerializer):
     def validate_photo(self, photo):
         if photo and photo.size > 5 * 1024 * 1024:
             raise serializers.ValidationError("A foto deve ter no máximo 5 MB.")
-        return photo
+        return normalize_uploaded_image(photo, max_bytes=5 * 1024 * 1024)
 class FrequentlyAskedQuestionSerializer(serializers.ModelSerializer):
     class Meta: model = FrequentlyAskedQuestion; fields = "__all__"
 class AuditSerializer(serializers.ModelSerializer):

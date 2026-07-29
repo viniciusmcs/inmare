@@ -31,7 +31,8 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "./api";
-import type { FAQ, HeroSlide, InstitutionalImage, Lead, Page, Property, PublicContent, SiteSettings, Testimonial } from "./types";
+import { collectPages, paginateItems } from "./pagination";
+import type { FAQ, HeroSlide, InstitutionalImage, Lead, ListingOption, Page, Property, PublicContent, SiteSettings, Testimonial } from "./types";
 
 const reviewLabels: Record<string, string> = {
   green: "Novo",
@@ -269,6 +270,7 @@ export default function AdminPanel() {
     type: "",
     date: "",
   });
+  const [propertyPage, setPropertyPage] = useState(1);
   useEffect(() => {
     if (!notice && !error) return;
     const timer = window.setTimeout(() => {
@@ -290,14 +292,24 @@ export default function AdminPanel() {
     retry: false,
     queryFn: async () => {
       try {
-        const r = await api.get<Page<Property>>("/admin/properties/");
+        const allProperties = await collectPages("/admin/properties/", async (url) => {
+          const response = await api.get<Page<Property>>(url);
+          return response.data;
+        });
         setAuthenticated(true);
-        return r.data.results;
+        return allProperties;
       } catch (e) {
-        setAuthenticated(false);
+        if ((e as { response?: { status?: number } }).response?.status === 401) {
+          setAuthenticated(false);
+        }
         throw e;
       }
     },
+  });
+  const listingOptions = useQuery({
+    queryKey: ["admin-listing-options"],
+    enabled: authenticated === true,
+    queryFn: async () => (await api.get<ListingOption[]>("/admin/listing-options/")).data,
   });
   const leads = useQuery({
     queryKey: ["admin-leads"],
@@ -337,6 +349,19 @@ export default function AdminPanel() {
   });
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["admin-properties"] });
+  const createListingOption = async (
+    input: Pick<ListingOption, "kind" | "name" | "city">,
+  ) => {
+    const response = await api.post<ListingOption>("/admin/listing-options/", input);
+    queryClient.setQueryData<ListingOption[]>(
+      ["admin-listing-options"],
+      (current = []) => [...current, response.data],
+    );
+    const label = input.kind === "city" ? "Cidade" : input.kind === "neighborhood" ? "Bairro" : "Tipo";
+    setNotice(`${label} cadastrado com sucesso.`);
+    setError("");
+    return response.data;
+  };
   const save = useMutation({
     mutationFn: async () => {
       const requiredFields: Record<string, string> = {
@@ -588,6 +613,11 @@ export default function AdminPanel() {
     );
   });
   const propertyTypes = [...new Set(list.map((property) => property.property_type))].sort();
+  const propertiesPerPage = 10;
+  const paginatedProperties = paginateItems(filteredList, propertyPage, propertiesPerPage);
+  const propertyPageCount = paginatedProperties.pageCount;
+  const activePropertyPage = paginatedProperties.page;
+  const visibleProperties = paginatedProperties.items;
   return (
     <div className="admin">
       {(notice || error) && (
@@ -692,14 +722,20 @@ export default function AdminPanel() {
                   <input
                     value={filters.search}
                     placeholder="Nome, cidade, bairro ou código"
-                    onChange={(event) => setFilters({ ...filters, search: event.target.value })}
+                    onChange={(event) => {
+                      setFilters({ ...filters, search: event.target.value });
+                      setPropertyPage(1);
+                    }}
                   />
                 </label>
                 <label>
                   Status
                   <select
                     value={filters.status}
-                    onChange={(event) => setFilters({ ...filters, status: event.target.value })}
+                    onChange={(event) => {
+                      setFilters({ ...filters, status: event.target.value });
+                      setPropertyPage(1);
+                    }}
                   >
                     <option value="">Todos</option>
                     {Object.entries(statusLabels).map(([value, label]) => (
@@ -711,7 +747,10 @@ export default function AdminPanel() {
                   Tipo
                   <select
                     value={filters.type}
-                    onChange={(event) => setFilters({ ...filters, type: event.target.value })}
+                    onChange={(event) => {
+                      setFilters({ ...filters, type: event.target.value });
+                      setPropertyPage(1);
+                    }}
                   >
                     <option value="">Todos</option>
                     {propertyTypes.map((type) => <option key={type}>{type}</option>)}
@@ -722,18 +761,24 @@ export default function AdminPanel() {
                   <input
                     type="date"
                     value={filters.date}
-                    onChange={(event) => setFilters({ ...filters, date: event.target.value })}
+                    onChange={(event) => {
+                      setFilters({ ...filters, date: event.target.value });
+                      setPropertyPage(1);
+                    }}
                   />
                 </label>
                 <button
                   className="outline"
-                  onClick={() => setFilters({ search: "", status: "", type: "", date: "" })}
+                  onClick={() => {
+                    setFilters({ search: "", status: "", type: "", date: "" });
+                    setPropertyPage(1);
+                  }}
                 >
                   Limpar filtros
                 </button>
               </div>
               <div className="table">
-                {filteredList.map((p) => {
+                {visibleProperties.map((p) => {
                   const commercialStatus =
                     p.status === "sold"
                       ? { label: "Vendido", className: "sold" }
@@ -783,6 +828,42 @@ export default function AdminPanel() {
                   <p className="filter-empty">Nenhum imóvel encontrado com estes filtros.</p>
                 )}
               </div>
+              {!!filteredList.length && (
+                <nav className="admin-pagination" aria-label="Paginação dos imóveis">
+                  <span>
+                    Exibindo {(activePropertyPage - 1) * propertiesPerPage + 1}–{Math.min(activePropertyPage * propertiesPerPage, filteredList.length)} de {filteredList.length}
+                  </span>
+                  <div>
+                    <button
+                      type="button"
+                      className="outline"
+                      disabled={activePropertyPage === 1}
+                      onClick={() => setPropertyPage(activePropertyPage - 1)}
+                    >
+                      Anterior
+                    </button>
+                    {Array.from({ length: propertyPageCount }, (_, index) => index + 1).map((page) => (
+                      <button
+                        type="button"
+                        key={page}
+                        className={page === activePropertyPage ? "active" : ""}
+                        aria-current={page === activePropertyPage ? "page" : undefined}
+                        onClick={() => setPropertyPage(page)}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      className="outline"
+                      disabled={activePropertyPage === propertyPageCount}
+                      onClick={() => setPropertyPage(activePropertyPage + 1)}
+                    >
+                      Próxima
+                    </button>
+                  </div>
+                </nav>
+              )}
             </section>
           </>
         ) : (
@@ -802,6 +883,8 @@ export default function AdminPanel() {
             }
             back={() => setSelected(null)}
             saving={save.isPending}
+            listingOptions={listingOptions.data ?? []}
+            createListingOption={createListingOption}
           />
         )}
       </main>
@@ -1163,6 +1246,8 @@ function Editor({
   action,
   back,
   saving,
+  listingOptions,
+  createListingOption,
 }: {
   form: Record<string, string | boolean>;
   setForm: (v: Record<string, string | boolean>) => void;
@@ -1177,16 +1262,35 @@ function Editor({
   action: (n: string) => void;
   back: () => void;
   saving: boolean;
+  listingOptions: ListingOption[];
+  createListingOption: (
+    input: Pick<ListingOption, "kind" | "name" | "city">,
+  ) => Promise<ListingOption>;
 }) {
   const [saleConfirmation, setSaleConfirmation] = useState<"sell" | "restore" | null>(null);
   const [archiveConfirmation, setArchiveConfirmation] = useState<"archive" | "restore" | null>(null);
   const [draggingMedia, setDraggingMedia] = useState<string | null>(null);
   const [deletingMedia, setDeletingMedia] = useState<string | null>(null);
+  const [uploadingMedia, setUploadingMedia] = useState(false);
   const [mediaDeleteConfirmation, setMediaDeleteConfirmation] = useState<{ id: string; kind: string } | null>(null);
   const [propertyDeleteConfirmation, setPropertyDeleteConfirmation] = useState(false);
   const [deletingProperty, setDeletingProperty] = useState(false);
+  const [optionDialog, setOptionDialog] = useState<{
+    field: "property_type" | "city" | "neighborhood";
+    label: string;
+  } | null>(null);
+  const [newOptionName, setNewOptionName] = useState("");
+  const [optionError, setOptionError] = useState("");
+  const [creatingOption, setCreatingOption] = useState(false);
   const uploadFiles = async (files: FileList | File[]) => {
-    for (const file of Array.from(files)) await upload(file);
+    const selectedFiles = Array.from(files);
+    if (!selectedFiles.length || uploadingMedia) return;
+    setUploadingMedia(true);
+    try {
+      for (const file of selectedFiles) await upload(file);
+    } finally {
+      setUploadingMedia(false);
+    }
   };
   const field = (name: string, label: string, type = "text", required = false) => (
     <label>
@@ -1202,6 +1306,54 @@ function Editor({
       />
     </label>
   );
+  const catalogField = (
+    name: "property_type" | "city" | "neighborhood",
+    label: string,
+  ) => {
+    const options = listingOptions
+      .filter((option) => (
+        option.kind === name
+        && (name !== "neighborhood" || option.city === String(form.city))
+      ))
+      .sort((first, second) => first.name.localeCompare(second.name, "pt-BR"));
+    const disabled = name === "neighborhood" && !form.city;
+    return (
+      <div className="catalog-field">
+        <label>
+          <span>{label}<b className="required-mark"> *</b></span>
+          <select
+            required
+            disabled={disabled}
+            value={String(form[name] ?? "")}
+            onChange={(event) => {
+              const nextForm = { ...form, [name]: event.target.value };
+              if (name === "city") nextForm.neighborhood = "";
+              setForm(nextForm);
+            }}
+          >
+            <option value="">{disabled ? "Selecione primeiro a cidade" : `Selecione ${label.toLocaleLowerCase("pt-BR")}`}</option>
+            {options.map((option) => (
+              <option key={option.id} value={option.name}>{option.name}</option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="catalog-add"
+          disabled={disabled}
+          aria-label={`Cadastrar novo ${label.toLocaleLowerCase("pt-BR")}`}
+          title={`Cadastrar novo ${label.toLocaleLowerCase("pt-BR")}`}
+          onClick={() => {
+            setOptionDialog({ field: name, label });
+            setNewOptionName("");
+            setOptionError("");
+          }}
+        >
+          <Plus />
+        </button>
+      </div>
+    );
+  };
   return (
     <section className="admin-card editor">
       <button className="back" onClick={back}>
@@ -1229,9 +1381,9 @@ function Editor({
       <p className="required-note">* Campos obrigatórios</p>
       <div className="form-grid">
         {field("title", "Título", "text", true)}
-        {field("property_type", "Tipo", "text", true)}
-        {field("city", "Cidade", "text", true)}
-        {field("neighborhood", "Bairro", "text", true)}
+        {catalogField("property_type", "Tipo")}
+        {catalogField("city", "Cidade")}
+        {catalogField("neighborhood", "Bairro")}
         {field("price", "Valor", "number")}
         {field("condominium_fee", "Condomínio", "number")}
         {field("iptu", "IPTU", "number")}
@@ -1359,14 +1511,20 @@ function Editor({
         >
           <ImagePlus />
           <span>
-            <b>Arraste ou cole fotos e vídeos aqui</b>
-            Selecione vários arquivos de uma vez ou use Ctrl+V para colar.
+            <b>{uploadingMedia ? "Enviando arquivos…" : "Adicionar fotos, vídeos ou PDF"}</b>
+            {uploadingMedia
+              ? "Aguarde a conclusão antes de sair desta tela."
+              : "No iPhone, toque aqui e escolha a Fototeca. Fotos HEIC são convertidas automaticamente."}
           </span>
           <input
             type="file"
             multiple
-            accept="image/jpeg,image/png,image/webp,video/mp4,application/pdf"
-            onChange={(event) => { void uploadFiles(event.target.files ?? []); }}
+            disabled={uploadingMedia}
+            accept=".heic,.heif,image/heic,image/heif,image/jpeg,image/png,image/webp,video/mp4,application/pdf"
+            onChange={(event) => {
+              void uploadFiles(event.target.files ?? []);
+              event.target.value = "";
+            }}
           />
         </label>
       )}
@@ -1433,6 +1591,68 @@ function Editor({
           ))}
         </div>
       ) : null}
+      {optionDialog && (
+        <div className="confirm-backdrop">
+          <form
+            className="confirm-modal catalog-modal"
+            role="dialog"
+            aria-modal="true"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (!newOptionName.trim() || creatingOption) return;
+              setCreatingOption(true);
+              setOptionError("");
+              try {
+                const created = await createListingOption({
+                  kind: optionDialog.field,
+                  name: newOptionName.trim(),
+                  city: optionDialog.field === "neighborhood" ? String(form.city) : "",
+                });
+                const nextForm = { ...form, [optionDialog.field]: created.name };
+                if (optionDialog.field === "city") nextForm.neighborhood = "";
+                setForm(nextForm);
+                setOptionDialog(null);
+                setNewOptionName("");
+              } catch (createError) {
+                setOptionError(friendlyApiError(createError));
+              } finally {
+                setCreatingOption(false);
+              }
+            }}
+          >
+            <Plus />
+            <h2>Novo {optionDialog.label.toLocaleLowerCase("pt-BR")}</h2>
+            {optionDialog.field === "neighborhood" && (
+              <p>O novo bairro será vinculado à cidade <b>{String(form.city)}</b>.</p>
+            )}
+            <label>
+              Nome padronizado
+              <input
+                autoFocus
+                required
+                maxLength={120}
+                value={newOptionName}
+                onChange={(event) => setNewOptionName(event.target.value)}
+                placeholder={`Ex.: ${optionDialog.field === "city" ? "Capão da Canoa" : optionDialog.field === "neighborhood" ? "Atlântida" : "Casa"}`}
+              />
+            </label>
+            {optionError && <p className="form-error">{optionError}</p>}
+            <div>
+              <button
+                type="button"
+                className="outline"
+                disabled={creatingOption}
+                onClick={() => setOptionDialog(null)}
+              >
+                Cancelar
+              </button>
+              <button className="gold-button" disabled={creatingOption}>
+                <Plus /> {creatingOption ? "Cadastrando..." : "Cadastrar opção"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {mediaDeleteConfirmation && (
         <div className="confirm-backdrop">
           <div className="confirm-modal delete-confirm" role="alertdialog" aria-modal="true">

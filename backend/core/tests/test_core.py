@@ -1,15 +1,19 @@
 import tempfile
 import zipfile
 import base64
+from unittest.mock import patch
+from PIL import Image
 from datetime import timedelta
 from pathlib import Path
 import pytest
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework.test import APIClient
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from core.models import AuditEvent, FrequentlyAskedQuestion, HeroSlide, InstitutionalImage, Lead, Media, Property, SiteSettings, Testimonial as CustomerTestimonial
+from core.models import AuditEvent, FrequentlyAskedQuestion, HeroSlide, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial as CustomerTestimonial
+from core.media_utils import normalize_uploaded_image
 from core.services import extract_property_description, import_property_folder, validate_and_extract_zip
 
 pytestmark = pytest.mark.django_db
@@ -100,6 +104,53 @@ def test_admin_can_create_property_with_empty_form_defaults():
     assert response.data["featured"] is False
     assert response.data["price_on_request"] is False
 
+
+def test_admin_uses_controlled_listing_options():
+    admin = get_user_model().objects.create_superuser("catalog-admin", "catalog@example.com", "secret")
+    client = APIClient()
+    client.force_authenticate(admin)
+
+    options = client.get("/api/v1/admin/listing-options/")
+    assert options.status_code == 200
+    assert any(option["name"] == "Capão da Canoa" for option in options.data)
+
+    duplicate_city = client.post(
+        "/api/v1/admin/listing-options/",
+        {"kind": "city", "name": "capao da canoa", "city": ""},
+        format="json",
+    )
+    assert duplicate_city.status_code == 400
+    assert ListingOption.objects.filter(kind="city", key="capao da canoa").count() == 1
+
+    neighborhood = client.post(
+        "/api/v1/admin/listing-options/",
+        {"kind": "neighborhood", "name": "Parque Antártica", "city": "xangri la"},
+        format="json",
+    )
+    assert neighborhood.status_code == 201
+    assert neighborhood.data["city"] == "Xangri-Lá"
+
+
+def test_admin_rejects_property_location_outside_catalog():
+    admin = get_user_model().objects.create_superuser("catalog-property-admin", "catalog-property@example.com", "secret")
+    client = APIClient()
+    client.force_authenticate(admin)
+    response = client.post(
+        "/api/v1/admin/properties/",
+        {
+            "title": "Casa com cidade digitada incorretamente",
+            "property_type": "Casa",
+            "city": "Cidade inventada",
+            "neighborhood": "Centro",
+            "purpose": "sale",
+            "status": "draft",
+        },
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "botão +" in str(response.data["city"][0])
+
+
 def test_admin_can_preview_txt_import():
     admin = get_user_model().objects.create_superuser("txt-admin", "txt@example.com", "secret")
     client = APIClient()
@@ -126,6 +177,40 @@ def test_admin_can_upload_property_media():
     assert response.status_code == 201
     assert response.data["kind"] == "image"
     assert response.data["url"].startswith("/media/")
+
+
+def test_iphone_heic_is_converted_to_jpeg():
+    upload = SimpleUploadedFile("foto-iphone.heic", b"0000ftypheic0000heic", content_type="image/heic")
+    with patch("core.media_utils.Image.open", return_value=Image.new("RGB", (2, 2))):
+        converted = normalize_uploaded_image(upload, max_bytes=12 * 1024 * 1024)
+    assert converted.name == "foto-iphone.jpg"
+    assert converted.read().startswith(b"\xff\xd8\xff")
+
+
+def test_admin_uploads_iphone_heic_as_jpeg():
+    admin = get_user_model().objects.create_superuser("heic-admin", "heic@example.com", "secret")
+    prop = Property.objects.create(title="Casa iPhone", slug="casa-iphone", city="X", neighborhood="Y")
+    client = APIClient()
+    client.force_authenticate(admin)
+    upload = SimpleUploadedFile("fototeca.heic", b"0000ftypheic0000heic", content_type="image/heic")
+    with patch("core.media_utils.Image.open", return_value=Image.new("RGB", (2, 2))):
+        response = client.post(
+            f"/api/v1/admin/properties/{prop.id}/media/",
+            {"file": upload},
+            format="multipart",
+        )
+    assert response.status_code == 201
+    media = prop.media.get()
+    assert media.mime_type == "image/jpeg"
+    assert media.file.name.endswith(".jpg")
+
+
+def test_invalid_heic_signature_is_rejected():
+    upload = SimpleUploadedFile("foto.heic", b"not-heic", content_type="image/heic")
+    with pytest.raises(DRFValidationError) as error:
+        normalize_uploaded_image(upload, max_bytes=12 * 1024 * 1024)
+    assert "inválida" in str(error.value)
+
 
 def test_admin_rejects_image_with_invalid_signature():
     admin = get_user_model().objects.create_superuser("invalid-upload-admin", "invalid-upload@example.com", "secret")

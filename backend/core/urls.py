@@ -1,6 +1,6 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from .views import AdminAuditViewSet, AdminBrokerViewSet, AdminDevelopmentViewSet, AdminFrequentlyAskedQuestionViewSet, AdminHeroSlideViewSet, AdminImportViewSet, AdminInstitutionalImageViewSet, AdminLeadViewSet, AdminPropertyViewSet, AdminSettingsViewSet, AdminTestimonialViewSet, DashboardView, LeadViewSet, LoginView, LogoutView, PublicContentView, PublicDevelopmentViewSet, PublicFilterOptionsView, PublicPropertyViewSet, PublicSettingsView, RefreshCookieView
+from .views import AdminAuditViewSet, AdminBrokerViewSet, AdminDevelopmentViewSet, AdminFrequentlyAskedQuestionViewSet, AdminHeroSlideViewSet, AdminImportViewSet, AdminInstitutionalImageViewSet, AdminLeadViewSet, AdminListingOptionViewSet, AdminPropertyViewSet, AdminSettingsViewSet, AdminTestimonialViewSet, DashboardView, LeadViewSet, LoginView, LogoutView, PublicContentView, PublicDevelopmentViewSet, PublicFilterOptionsView, PublicPropertyViewSet, PublicSettingsView, RefreshCookieView
 
 public = DefaultRouter()
 public.register("properties", PublicPropertyViewSet, basename="public-properties")
@@ -8,6 +8,7 @@ public.register("developments", PublicDevelopmentViewSet, basename="public-devel
 public.register("leads", LeadViewSet, basename="public-leads")
 admin = DefaultRouter()
 admin.register("properties", AdminPropertyViewSet)
+admin.register("listing-options", AdminListingOptionViewSet, basename="listing-options")
 admin.register("developments", AdminDevelopmentViewSet)
 admin.register("leads", AdminLeadViewSet)
 admin.register("brokers", AdminBrokerViewSet)

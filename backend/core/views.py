@@ -18,9 +18,10 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import AuditEvent, Broker, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, Media, Property, SiteSettings, Testimonial
-from .serializers import AdminLeadSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
+from .models import AuditEvent, Broker, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial
+from .serializers import AdminLeadSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, ListingOptionSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
 from .services import extract_property_description, import_property_folder, import_property_zip
+from .media_utils import normalize_uploaded_image
 
 class LeadThrottle(AnonRateThrottle): scope = "lead"
 class LoginThrottle(AnonRateThrottle): scope = "login"
@@ -232,6 +233,30 @@ class LeadViewSet(mixins.CreateModelMixin, viewsets.GenericViewSet):
     serializer_class = LeadSerializer
     queryset = Lead.objects.all()
 
+
+class AdminListingOptionViewSet(
+    mixins.ListModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = ListingOptionSerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        return ListingOption.objects.filter(active=True)
+
+    def perform_create(self, serializer):
+        option = serializer.save()
+        AuditEvent.objects.create(
+            actor=self.request.user,
+            action="listing_option.created",
+            entity_type="ListingOption",
+            entity_id=str(option.id),
+            metadata={"kind": option.kind, "name": option.name, "city": option.city},
+        )
+
+
 class AdminPropertyViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]
     serializer_class = AdminPropertySerializer
@@ -283,6 +308,12 @@ class AdminPropertyViewSet(viewsets.ModelViewSet):
         prop = self.get_object()
         upload = request.FILES.get("file")
         if not upload: raise ValidationError({"file": "Selecione um arquivo."})
+        original_extension = os.path.splitext(upload.name)[1].lower()
+        if original_extension in {".heic", ".heif"}:
+            try:
+                upload = normalize_uploaded_image(upload, max_bytes=300 * 1024 * 1024)
+            except ValidationError as exc:
+                raise ValidationError({"file": exc.detail}) from exc
         extension = os.path.splitext(upload.name)[1].lower()
         kinds = {".jpg": Media.Kind.IMAGE, ".jpeg": Media.Kind.IMAGE, ".png": Media.Kind.IMAGE, ".webp": Media.Kind.IMAGE, ".mp4": Media.Kind.VIDEO, ".pdf": Media.Kind.DOCUMENT}
         if extension not in kinds: raise ValidationError({"file": "Formato não permitido."})

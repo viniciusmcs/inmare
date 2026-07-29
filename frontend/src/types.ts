@@ -56,6 +56,13 @@ export type Page<T> = {
   previous: string | null;
   results: T[];
 };
+export type ListingOption = {
+  id: string;
+  kind: "property_type" | "city" | "neighborhood";
+  name: string;
+  city: string;
+  active: boolean;
+};
 export type Lead = {
   id: string;
   name: string;
