@@ -19,6 +19,7 @@ export function HeroExperience({ content, settings, properties }: { content?: Pu
   const [index, setIndex] = useState(0);
   const [videoFailed, setVideoFailed] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const fillVideoRef = useRef<HTMLVideoElement>(null);
   const hasVideo = Boolean(settings?.hero_video_enabled && settings.hero_video_src && !videoFailed);
   useEffect(() => {
     setVideoFailed(false);
@@ -31,26 +32,36 @@ export function HeroExperience({ content, settings, properties }: { content?: Pu
   useEffect(() => {
     const preference = window.matchMedia?.("(prefers-reduced-motion: reduce)");
     const syncPlayback = () => {
-      if (!videoRef.current) return;
-      if (preference?.matches) videoRef.current.pause();
-      else {
+      const videos = [videoRef.current, fillVideoRef.current].filter(Boolean) as HTMLVideoElement[];
+      if (!videos.length) return;
+      if (preference?.matches) videos.forEach((video) => video.pause());
+      else videos.forEach((video) => {
         try {
-          const playback = videoRef.current.play();
+          const playback = video.play();
           playback?.catch(() => undefined);
         } catch {
           // A imagem de capa continua visível quando o navegador bloqueia autoplay.
         }
-      }
+      });
     };
-    if (preference?.matches) videoRef.current?.pause();
+    if (preference?.matches) [videoRef.current, fillVideoRef.current].forEach((video) => video?.pause());
     preference?.addEventListener?.("change", syncPlayback);
     return () => preference?.removeEventListener?.("change", syncPlayback);
   }, [hasVideo, settings?.hero_video_src]);
+  const syncVideoLayers = () => {
+    const video = videoRef.current;
+    const fillVideo = fillVideoRef.current;
+    if (!video || !fillVideo || Math.abs(video.currentTime - fillVideo.currentTime) < 0.18) return;
+    fillVideo.currentTime = video.currentTime;
+  };
   const slide = slides[index];
   const poster = settings?.hero_poster_src || slide.image_src;
   return <div className="home-hero-stage">
     <section className={`hero home-video-hero ${hasVideo ? "is-video" : ""}`} style={{ backgroundImage: `url("${poster}")` }}>
-      {hasVideo && <video ref={videoRef} className="hero-background-video" src={settings?.hero_video_src} poster={poster} autoPlay muted loop playsInline preload="metadata" onError={() => setVideoFailed(true)} />}
+      {hasVideo && <>
+        <video ref={fillVideoRef} className="hero-background-video hero-background-video-fill" src={settings?.hero_video_src} poster={poster} autoPlay muted loop playsInline preload="metadata" aria-hidden="true" />
+        <video ref={videoRef} className="hero-background-video hero-background-video-fit" src={settings?.hero_video_src} poster={poster} autoPlay muted loop playsInline preload="metadata" onTimeUpdate={syncVideoLayers} onError={() => setVideoFailed(true)} />
+      </>}
       <div className="hero-video-shade" />
       {!hasVideo && slides.length > 1 && <div className="hero-dots">{slides.map((item, itemIndex) => <button aria-label={`Banner ${itemIndex + 1}`} className={itemIndex === index ? "active" : ""} key={item.id} onClick={() => setIndex(itemIndex)} />)}</div>}
     </section>

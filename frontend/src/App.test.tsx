@@ -49,5 +49,8 @@ test("renders the configured home background video with a poster", () => {
   const video = container.querySelector(".hero-background-video");
   expect(video).toHaveAttribute("src", "/media/hero.mp4");
   expect(video).toHaveAttribute("poster", "/media/poster.jpg");
+  expect(container.querySelectorAll(".hero-background-video")).toHaveLength(2);
+  expect(container.querySelector(".hero-background-video-fill")).toBeInTheDocument();
+  expect(container.querySelector(".hero-background-video-fit")).toBeInTheDocument();
   expect(container.querySelector(".hero-search-bar")).toBeInTheDocument();
 });
