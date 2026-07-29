@@ -12,7 +12,7 @@ test("renders premium home", () => {
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  expect(screen.getByText(/Seu próximo/i)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Buscar imóveis/i })).toBeInTheDocument();
 });
 
 test("renders favorites route without requiring login", () => {

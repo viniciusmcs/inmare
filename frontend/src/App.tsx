@@ -52,11 +52,6 @@ export function HeroExperience({ content, settings, properties }: { content?: Pu
     <section className={`hero home-video-hero ${hasVideo ? "is-video" : ""}`} style={{ backgroundImage: `url("${poster}")` }}>
       {hasVideo && <video ref={videoRef} className="hero-background-video" src={settings?.hero_video_src} poster={poster} autoPlay muted loop playsInline preload="metadata" onError={() => setVideoFailed(true)} />}
       <div className="hero-video-shade" />
-      <div className="hero-video-copy">
-        <small>IN MARE NEGÓCIOS IMOBILIÁRIOS</small>
-        <h1>{slide.title}</h1>
-        <p>{slide.subtitle}</p>
-      </div>
       {!hasVideo && slides.length > 1 && <div className="hero-dots">{slides.map((item, itemIndex) => <button aria-label={`Banner ${itemIndex + 1}`} className={itemIndex === index ? "active" : ""} key={item.id} onClick={() => setIndex(itemIndex)} />)}</div>}
     </section>
     <div className="hero-search-shell"><SearchBar properties={properties} overlay /></div>
