@@ -18,6 +18,7 @@ import {
   Mail,
   Menu,
   MessageCircle,
+  Pencil,
   Plus,
   Save,
   Settings,
@@ -359,6 +360,32 @@ export default function AdminPanel() {
     );
     const label = input.kind === "city" ? "Cidade" : input.kind === "neighborhood" ? "Bairro" : "Tipo";
     setNotice(`${label} cadastrado com sucesso.`);
+    setError("");
+    return response.data;
+  };
+  const updateListingOption = async (
+    id: string,
+    input: Pick<ListingOption, "name" | "city">,
+  ) => {
+    const currentOptions = listingOptions.data ?? [];
+    const previous = currentOptions.find((option) => option.id === id);
+    const response = await api.patch<ListingOption>(`/admin/listing-options/${id}/`, input);
+    queryClient.setQueryData<ListingOption[]>(
+      ["admin-listing-options"],
+      (current = []) => current.map((option) => {
+        if (option.id === id) return response.data;
+        if (
+          previous?.kind === "city"
+          && option.kind === "neighborhood"
+          && option.city === previous.name
+        ) {
+          return { ...option, city: response.data.name };
+        }
+        return option;
+      }),
+    );
+    await queryClient.invalidateQueries({ queryKey: ["admin-properties"] });
+    setNotice("Nome atualizado em todos os imóveis vinculados.");
     setError("");
     return response.data;
   };
@@ -885,6 +912,7 @@ export default function AdminPanel() {
             saving={save.isPending}
             listingOptions={listingOptions.data ?? []}
             createListingOption={createListingOption}
+            updateListingOption={updateListingOption}
           />
         )}
       </main>
@@ -1248,6 +1276,7 @@ function Editor({
   saving,
   listingOptions,
   createListingOption,
+  updateListingOption,
 }: {
   form: Record<string, string | boolean>;
   setForm: (v: Record<string, string | boolean>) => void;
@@ -1266,6 +1295,10 @@ function Editor({
   createListingOption: (
     input: Pick<ListingOption, "kind" | "name" | "city">,
   ) => Promise<ListingOption>;
+  updateListingOption: (
+    id: string,
+    input: Pick<ListingOption, "name" | "city">,
+  ) => Promise<ListingOption>;
 }) {
   const [saleConfirmation, setSaleConfirmation] = useState<"sell" | "restore" | null>(null);
   const [archiveConfirmation, setArchiveConfirmation] = useState<"archive" | "restore" | null>(null);
@@ -1278,6 +1311,7 @@ function Editor({
   const [optionDialog, setOptionDialog] = useState<{
     field: "property_type" | "city" | "neighborhood";
     label: string;
+    option?: ListingOption;
   } | null>(null);
   const [newOptionName, setNewOptionName] = useState("");
   const [optionError, setOptionError] = useState("");
@@ -1317,6 +1351,7 @@ function Editor({
       ))
       .sort((first, second) => first.name.localeCompare(second.name, "pt-BR"));
     const disabled = name === "neighborhood" && !form.city;
+    const selectedOption = options.find((option) => option.name === String(form[name] ?? ""));
     return (
       <div className="catalog-field">
         <label>
@@ -1337,6 +1372,21 @@ function Editor({
             ))}
           </select>
         </label>
+        <button
+          type="button"
+          className="catalog-edit"
+          disabled={disabled || !selectedOption}
+          aria-label={`Editar ${label.toLocaleLowerCase("pt-BR")} selecionado`}
+          title={`Editar ${label.toLocaleLowerCase("pt-BR")} selecionado`}
+          onClick={() => {
+            if (!selectedOption) return;
+            setOptionDialog({ field: name, label, option: selectedOption });
+            setNewOptionName(selectedOption.name);
+            setOptionError("");
+          }}
+        >
+          <Pencil />
+        </button>
         <button
           type="button"
           className="catalog-add"
@@ -1603,13 +1653,18 @@ function Editor({
               setCreatingOption(true);
               setOptionError("");
               try {
-                const created = await createListingOption({
-                  kind: optionDialog.field,
+                const optionData = {
                   name: newOptionName.trim(),
                   city: optionDialog.field === "neighborhood" ? String(form.city) : "",
-                });
-                const nextForm = { ...form, [optionDialog.field]: created.name };
-                if (optionDialog.field === "city") nextForm.neighborhood = "";
+                };
+                const savedOption = optionDialog.option
+                  ? await updateListingOption(optionDialog.option.id, optionData)
+                  : await createListingOption({
+                      kind: optionDialog.field,
+                      ...optionData,
+                    });
+                const nextForm = { ...form, [optionDialog.field]: savedOption.name };
+                if (optionDialog.field === "city" && !optionDialog.option) nextForm.neighborhood = "";
                 setForm(nextForm);
                 setOptionDialog(null);
                 setNewOptionName("");
@@ -1620,10 +1675,15 @@ function Editor({
               }
             }}
           >
-            <Plus />
-            <h2>Novo {optionDialog.label.toLocaleLowerCase("pt-BR")}</h2>
+            {optionDialog.option ? <Pencil /> : <Plus />}
+            <h2>
+              {optionDialog.option ? "Editar" : "Novo"} {optionDialog.label.toLocaleLowerCase("pt-BR")}
+            </h2>
+            {optionDialog.option && (
+              <p>O novo nome será aplicado automaticamente a todos os imóveis vinculados.</p>
+            )}
             {optionDialog.field === "neighborhood" && (
-              <p>O novo bairro será vinculado à cidade <b>{String(form.city)}</b>.</p>
+              <p>Este bairro pertence à cidade <b>{String(form.city)}</b>.</p>
             )}
             <label>
               Nome padronizado
@@ -1647,7 +1707,10 @@ function Editor({
                 Cancelar
               </button>
               <button className="gold-button" disabled={creatingOption}>
-                <Plus /> {creatingOption ? "Cadastrando..." : "Cadastrar opção"}
+                {optionDialog.option ? <Pencil /> : <Plus />}
+                {creatingOption
+                  ? optionDialog.option ? "Salvando..." : "Cadastrando..."
+                  : optionDialog.option ? "Salvar novo nome" : "Cadastrar opção"}
               </button>
             </div>
           </form>

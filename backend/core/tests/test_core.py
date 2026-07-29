@@ -131,6 +131,67 @@ def test_admin_uses_controlled_listing_options():
     assert neighborhood.data["city"] == "Xangri-Lá"
 
 
+def test_admin_renames_catalog_options_and_updates_properties():
+    admin = get_user_model().objects.create_superuser("catalog-editor", "catalog-editor@example.com", "secret")
+    client = APIClient()
+    client.force_authenticate(admin)
+    prop = Property.objects.create(
+        title="Casa para renomear catálogo",
+        slug="casa-renomear-catalogo",
+        property_type="Casa",
+        city="Xangri-Lá",
+        neighborhood="Atlântida",
+    )
+    city = ListingOption.objects.get(kind="city", name="Xangri-Lá")
+    neighborhood = ListingOption.objects.get(kind="neighborhood", name="Atlântida", city="Xangri-Lá")
+    property_type = ListingOption.objects.get(kind="property_type", name="Casa")
+
+    city_response = client.patch(
+        f"/api/v1/admin/listing-options/{city.id}/",
+        {"name": "Xangri-Lá Litoral"},
+        format="json",
+    )
+    assert city_response.status_code == 200
+    prop.refresh_from_db()
+    neighborhood.refresh_from_db()
+    assert prop.city == "Xangri-Lá Litoral"
+    assert neighborhood.city == "Xangri-Lá Litoral"
+
+    neighborhood_response = client.patch(
+        f"/api/v1/admin/listing-options/{neighborhood.id}/",
+        {"name": "Atlântida Sul"},
+        format="json",
+    )
+    assert neighborhood_response.status_code == 200
+    prop.refresh_from_db()
+    assert prop.neighborhood == "Atlântida Sul"
+
+    type_response = client.patch(
+        f"/api/v1/admin/listing-options/{property_type.id}/",
+        {"name": "Casa residencial"},
+        format="json",
+    )
+    assert type_response.status_code == 200
+    prop.refresh_from_db()
+    assert prop.property_type == "Casa residencial"
+    assert AuditEvent.objects.filter(action="listing_option.updated").count() == 3
+
+
+def test_admin_cannot_rename_catalog_option_to_duplicate():
+    admin = get_user_model().objects.create_superuser("catalog-duplicate-editor", "catalog-duplicate@example.com", "secret")
+    client = APIClient()
+    client.force_authenticate(admin)
+    city = ListingOption.objects.get(kind="city", name="Xangri-Lá")
+    response = client.patch(
+        f"/api/v1/admin/listing-options/{city.id}/",
+        {"name": "capao da canoa"},
+        format="json",
+    )
+    assert response.status_code == 400
+    city.refresh_from_db()
+    assert city.name == "Xangri-Lá"
+
+
 def test_admin_rejects_property_location_outside_catalog():
     admin = get_user_model().objects.create_superuser("catalog-property-admin", "catalog-property@example.com", "secret")
     client = APIClient()

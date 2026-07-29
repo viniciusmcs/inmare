@@ -99,13 +99,15 @@ class ListingOptionSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "active")
 
     def validate(self, attrs):
-        kind = attrs["kind"]
-        name = " ".join(attrs["name"].split())
+        kind = attrs.get("kind", getattr(self.instance, "kind", ""))
+        if self.instance and attrs.get("kind", kind) != self.instance.kind:
+            raise serializers.ValidationError({"kind": "O tipo da opção não pode ser alterado."})
+        name = " ".join(attrs.get("name", getattr(self.instance, "name", "")).split())
         if not name:
             raise serializers.ValidationError({"name": "Informe um nome."})
         city = ""
         if kind == ListingOption.Kind.NEIGHBORHOOD:
-            requested_city = attrs.get("city", "")
+            requested_city = attrs.get("city", getattr(self.instance, "city", ""))
             city_option = ListingOption.objects.filter(
                 kind=ListingOption.Kind.CITY,
                 key=catalog_key(requested_city),
@@ -118,7 +120,10 @@ class ListingOptionSerializer(serializers.ModelSerializer):
             kind=kind,
             key=catalog_key(name),
             city_key=catalog_key(city),
-        ).first()
+        )
+        if self.instance:
+            duplicate = duplicate.exclude(pk=self.instance.pk)
+        duplicate = duplicate.first()
         if duplicate:
             raise serializers.ValidationError({"name": f'Opção já cadastrada como “{duplicate.name}”.'})
         attrs["name"] = name

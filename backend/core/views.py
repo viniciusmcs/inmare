@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import AuditEvent, Broker, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial
+from .models import AuditEvent, Broker, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial, catalog_key
 from .serializers import AdminLeadSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, ListingOptionSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
 from .services import extract_property_description, import_property_folder, import_property_zip
 from .media_utils import normalize_uploaded_image
@@ -237,6 +237,7 @@ class LeadViewSet(mixins.CreateModelMixin, viewsets.GenericViewSet):
 class AdminListingOptionViewSet(
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
     permission_classes = [permissions.IsAdminUser]
@@ -255,6 +256,40 @@ class AdminListingOptionViewSet(
             entity_id=str(option.id),
             metadata={"kind": option.kind, "name": option.name, "city": option.city},
         )
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            current = ListingOption.objects.select_for_update().get(pk=serializer.instance.pk)
+            old_name = current.name
+            old_city = current.city
+            serializer.instance = current
+            option = serializer.save()
+            if option.kind == ListingOption.Kind.PROPERTY_TYPE:
+                updated = Property.objects.filter(property_type=old_name).update(property_type=option.name)
+            elif option.kind == ListingOption.Kind.CITY:
+                updated = Property.objects.filter(city=old_name).update(city=option.name)
+                ListingOption.objects.filter(
+                    kind=ListingOption.Kind.NEIGHBORHOOD,
+                    city=old_name,
+                ).update(city=option.name, city_key=catalog_key(option.name))
+            else:
+                updated = Property.objects.filter(
+                    city=old_city,
+                    neighborhood=old_name,
+                ).update(neighborhood=option.name)
+            AuditEvent.objects.create(
+                actor=self.request.user,
+                action="listing_option.updated",
+                entity_type="ListingOption",
+                entity_id=str(option.id),
+                metadata={
+                    "kind": option.kind,
+                    "old_name": old_name,
+                    "new_name": option.name,
+                    "city": option.city,
+                    "properties_updated": updated,
+                },
+            )
 
 
 class AdminPropertyViewSet(viewsets.ModelViewSet):
