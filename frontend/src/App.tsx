@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ArrowRight, Bath, BedDouble, Building2, CalendarDays, Car, CheckCircle2, ChevronDown, Heart, Home, List, Map as MapIcon, MapPin, MessageCircle, Printer, Ruler, Send, Share2, X } from "lucide-react";
 import { Link, Route, Routes, useParams, useSearchParams } from "react-router-dom";
@@ -14,12 +14,53 @@ function usePropertyPage(params = "") { return useQuery<Page<Property>>({ queryK
 function Shell({ children }: { children: React.ReactNode }) { const { data } = useSettings(); return <><Header /><main>{children}</main><Footer settings={data} /></>; }
 const formatMoney = (value?: string | null) => value ? Number(value).toLocaleString("pt-BR", { style: "currency", currency: "BRL" }) : "Sob consulta";
 
-function HeroSlider({ content }: { content?: PublicContent }) {
+export function HeroExperience({ content, settings, properties }: { content?: PublicContent; settings?: SiteSettings; properties: Property[] }) {
   const slides = content?.hero_slides?.length ? content.hero_slides : [{ id: "default", title: "Seu próximo imóvel começa aqui", subtitle: "Compra, venda e oportunidades com segurança, transparência e excelência.", image_src: "/assets/brand/imobiliaria4.jpg", link_url: "/imoveis", link_label: "Ver imóveis" }];
   const [index, setIndex] = useState(0);
-  useEffect(() => { const timer = window.setInterval(() => setIndex((value) => (value + 1) % slides.length), 5000); return () => window.clearInterval(timer); }, [slides.length]);
+  const [videoFailed, setVideoFailed] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const hasVideo = Boolean(settings?.hero_video_enabled && settings.hero_video_src && !videoFailed);
+  useEffect(() => {
+    setVideoFailed(false);
+  }, [settings?.hero_video_src]);
+  useEffect(() => {
+    if (hasVideo) return;
+    const timer = window.setInterval(() => setIndex((value) => (value + 1) % slides.length), 5000);
+    return () => window.clearInterval(timer);
+  }, [hasVideo, slides.length]);
+  useEffect(() => {
+    const preference = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    const syncPlayback = () => {
+      if (!videoRef.current) return;
+      if (preference?.matches) videoRef.current.pause();
+      else {
+        try {
+          const playback = videoRef.current.play();
+          playback?.catch(() => undefined);
+        } catch {
+          // A imagem de capa continua visível quando o navegador bloqueia autoplay.
+        }
+      }
+    };
+    if (preference?.matches) videoRef.current?.pause();
+    preference?.addEventListener?.("change", syncPlayback);
+    return () => preference?.removeEventListener?.("change", syncPlayback);
+  }, [hasVideo, settings?.hero_video_src]);
   const slide = slides[index];
-  return <section className="hero" style={{ backgroundImage: `linear-gradient(90deg,rgba(3,18,33,.94),rgba(3,18,33,.25)),url("${slide.image_src}")` }}><div><small>IN MARE NEGÓCIOS IMOBILIÁRIOS</small><h1>{slide.title}</h1><p>{slide.subtitle}</p><div className="hero-actions"><Link className="gold-button" to={slide.link_url || "/imoveis"}>{slide.link_label || "Ver imóveis"} <ArrowRight /></Link><Link className="dark-button" to="/contato"><MessageCircle /> Fale conosco</Link></div></div><div className="hero-dots">{slides.map((item, itemIndex) => <button aria-label={`Banner ${itemIndex + 1}`} className={itemIndex === index ? "active" : ""} key={item.id} onClick={() => setIndex(itemIndex)} />)}</div></section>;
+  const poster = settings?.hero_poster_src || slide.image_src;
+  return <div className="home-hero-stage">
+    <section className={`hero home-video-hero ${hasVideo ? "is-video" : ""}`} style={{ backgroundImage: `url("${poster}")` }}>
+      {hasVideo && <video ref={videoRef} className="hero-background-video" src={settings?.hero_video_src} poster={poster} autoPlay muted loop playsInline preload="metadata" onError={() => setVideoFailed(true)} />}
+      <div className="hero-video-shade" />
+      <div className="hero-video-copy">
+        <small>IN MARE NEGÓCIOS IMOBILIÁRIOS</small>
+        <h1>{slide.title}</h1>
+        <p>{slide.subtitle}</p>
+      </div>
+      {!hasVideo && slides.length > 1 && <div className="hero-dots">{slides.map((item, itemIndex) => <button aria-label={`Banner ${itemIndex + 1}`} className={itemIndex === index ? "active" : ""} key={item.id} onClick={() => setIndex(itemIndex)} />)}</div>}
+    </section>
+    <div className="hero-search-shell"><SearchBar properties={properties} overlay /></div>
+  </div>;
 }
 
 function HomePage() {
@@ -27,16 +68,17 @@ function HomePage() {
   const { data: featuredData } = usePropertyPage("page_size=20&featured=true");
   const { data: launchData } = usePropertyPage("page_size=10&launches=true");
   const { data: content } = useContent();
+  const { data: settings } = useSettings();
   const properties = data?.results ?? [];
-  return <Shell><Seo title="Imóveis exclusivos no litoral" path="/" structuredData={organizationSchema()} /><HeroSlider content={content} /><SearchBar properties={properties} />
-    <PropertySection eyebrow="SELEÇÃO ESPECIAL" title="Imóveis em destaque" properties={(featuredData?.results ?? []).slice(0, 4)} loading={isLoading} href="/imoveis?featured=true" />
-    <PropertySection eyebrow="RECÉM-CADASTRADOS" title="Lançamentos" properties={(launchData?.results ?? []).slice(0, 4)} loading={isLoading} href="/imoveis?ordering=-created_at" />
+  return <Shell><Seo title="Imóveis exclusivos no litoral" path="/" structuredData={organizationSchema()} /><HeroExperience content={content} settings={settings} properties={properties} />
+    <PropertySection eyebrow="SELEÇÃO ESPECIAL" title="Imóveis em destaque" properties={(featuredData?.results ?? []).slice(0, 4)} loading={isLoading} href="/imoveis?featured=true" horizontal />
+    <PropertySection eyebrow="RECÉM-CADASTRADOS" title="Lançamentos" properties={(launchData?.results ?? []).slice(0, 4)} loading={isLoading} href="/imoveis?ordering=-created_at" horizontal />
     <section className="benefits">{benefits.map(({ icon: Icon, title, text }) => <div key={title}><Icon /><span><b>{title}</b><p>{text}</p></span></div>)}</section>
     {!!content?.testimonials.length && <section className="section testimonials"><div className="section-title"><div><small>EXPERIÊNCIAS</small><h2>Relatos de clientes</h2></div></div><div className="testimonial-grid">{content.testimonials.map((item) => <blockquote key={item.id}><header>{item.photo_src ? <img src={item.photo_src} alt={item.name} /> : <span className="testimonial-avatar">{item.name.slice(0, 1)}</span>}<div><b>{item.name}</b><small>{item.role}</small></div></header><p>“{item.text}”</p></blockquote>)}</div></section>}
     <section className="section service-choices"><div><small>ATENDIMENTO PERSONALIZADO</small><h2>Ainda não encontrou?</h2><p>Conte o que procura e a equipe In Mare fará uma busca sob medida.</p><Link className="gold-button" to="/encontrar-imovel">Encontrar meu imóvel</Link></div><div><small>CAPTAÇÃO IN MARE</small><h2>Quer anunciar?</h2><p>Envie as informações do seu imóvel para nossa equipe avaliar.</p><Link className="outline" to="/anuncie-seu-imovel">Anuncie seu imóvel</Link></div></section>
   </Shell>;
 }
-function PropertySection({ eyebrow, title, properties, loading, href }: { eyebrow: string; title: string; properties: Property[]; loading: boolean; href: string }) { return <section className="section"><div className="section-title"><div><small>{eyebrow}</small><h2>{title}</h2></div><Link to={href}>Ver todos <ArrowRight /></Link></div>{loading ? <SkeletonCards /> : properties.length ? <div className="property-grid">{properties.map((p) => <PropertyCard key={p.slug} property={p} />)}</div> : <Empty />}</section>; }
+function PropertySection({ eyebrow, title, properties, loading, href, horizontal = false }: { eyebrow: string; title: string; properties: Property[]; loading: boolean; href: string; horizontal?: boolean }) { return <section className={`section ${horizontal ? "home-property-section" : ""}`}><div className="section-title"><div><small>{eyebrow}</small><h2>{title}</h2></div><Link to={href}>Ver todos <ArrowRight /></Link></div>{loading ? <SkeletonCards /> : properties.length ? <div className={`property-grid ${horizontal ? "home-property-row" : ""}`}>{properties.map((p) => <PropertyCard key={p.slug} property={p} />)}</div> : <Empty />}</section>; }
 
 function PropertiesPage() {
   const [params, setParams] = useSearchParams();

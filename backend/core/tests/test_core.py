@@ -621,6 +621,44 @@ def test_public_settings_expose_institutional_contact():
     assert response.status_code == 200
     assert response.data["whatsapp"] == "5551999999999"
 
+def test_admin_can_upload_toggle_and_clear_home_hero_video(tmp_path, settings):
+    settings.MEDIA_ROOT = tmp_path
+    site_settings = SiteSettings.objects.create(company_name="In Mare")
+    admin = get_user_model().objects.create_superuser("video-admin", "video@example.com", "secret")
+    client = APIClient()
+    client.force_authenticate(admin)
+
+    invalid = client.patch(
+        f"/api/v1/admin/content/{site_settings.id}/",
+        {"hero_video": SimpleUploadedFile("hero.mp4", b"not-a-video", content_type="video/mp4")},
+        format="multipart",
+    )
+    assert invalid.status_code == 400
+
+    mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2"
+    uploaded = client.patch(
+        f"/api/v1/admin/content/{site_settings.id}/",
+        {
+            "hero_video": SimpleUploadedFile("hero.mp4", mp4, content_type="video/mp4"),
+            "hero_video_enabled": True,
+        },
+        format="multipart",
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.data["hero_video_src"].endswith(".mp4")
+    assert uploaded.data["hero_video_enabled"] is True
+    public = APIClient().get("/api/v1/public/settings/")
+    assert public.data["hero_video_src"].endswith(".mp4")
+
+    site_settings.refresh_from_db()
+    stored_path = Path(site_settings.hero_video.path)
+    assert stored_path.exists()
+    cleared = client.post(f"/api/v1/admin/content/{site_settings.id}/clear-hero-video/")
+    assert cleared.status_code == 200
+    assert cleared.data["hero_video_src"] == ""
+    assert cleared.data["hero_video_enabled"] is False
+    assert not stored_path.exists()
+
 def test_public_properties_paginate_twenty_and_filter_options_cover_catalog():
     for index in range(25):
         Property.objects.create(

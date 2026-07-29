@@ -563,6 +563,47 @@ class AdminBrokerViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = BrokerSerializer; queryset = Broker.objects.all()
 class AdminSettingsViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = SiteSettingsSerializer; queryset = SiteSettings.objects.all()
+    def perform_update(self, serializer):
+        old_files = {
+            "hero_video": (serializer.instance.hero_video.storage, serializer.instance.hero_video.name)
+            if serializer.instance.hero_video else None,
+            "hero_poster": (serializer.instance.hero_poster.storage, serializer.instance.hero_poster.name)
+            if serializer.instance.hero_poster else None,
+        }
+        updated = serializer.save()
+        for field_name, stored in old_files.items():
+            current = getattr(updated, field_name)
+            if stored and stored[1] != (current.name if current else ""):
+                stored[0].delete(stored[1])
+        if self.request.FILES:
+            AuditEvent.objects.create(
+                actor=self.request.user,
+                action="content.hero_video_updated",
+                entity_type="SiteSettings",
+                entity_id=str(updated.id),
+                metadata={"poster_updated": "hero_poster" in self.request.FILES},
+            )
+    @action(detail=True, methods=["post"], url_path="clear-hero-video")
+    def clear_hero_video(self, request, pk=None):
+        settings = self.get_object()
+        stored_files = [
+            (field.storage, field.name)
+            for field in (settings.hero_video, settings.hero_poster)
+            if field and field.name
+        ]
+        settings.hero_video = ""
+        settings.hero_poster = ""
+        settings.hero_video_enabled = False
+        settings.save(update_fields=["hero_video", "hero_poster", "hero_video_enabled", "updated_at"])
+        for storage, name in stored_files:
+            storage.delete(name)
+        AuditEvent.objects.create(
+            actor=request.user,
+            action="content.hero_video_cleared",
+            entity_type="SiteSettings",
+            entity_id=str(settings.id),
+        )
+        return Response(self.get_serializer(settings).data)
 class AdminHeroSlideViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = HeroSlideSerializer; queryset = HeroSlide.objects.all()
 class AdminInstitutionalImageViewSet(viewsets.ModelViewSet):

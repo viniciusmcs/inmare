@@ -1124,15 +1124,72 @@ function ContentPanel({ notify }: { notify: (message: string, failed?: boolean) 
   };
   const input = (name: keyof SiteSettings, label: string) => <label>{label}<input value={String(settings[name] ?? "")} onChange={(event) => setSettings({ ...settings, [name]: event.target.value })} /></label>;
   const textarea = (name: keyof SiteSettings, label: string) => <label>{label}<textarea rows={5} value={String(settings[name] ?? "")} onChange={(event) => setSettings({ ...settings, [name]: event.target.value })} /></label>;
+  const refreshHeroSettings = (updated: SiteSettings & { id?: string }) => {
+    setSettings(updated);
+    queryClient.invalidateQueries({ queryKey: ["admin-settings"] });
+    queryClient.invalidateQueries({ queryKey: ["public-settings"] });
+  };
   return <div className="content-admin">
     <section className="admin-card"><h2>Contato e redes sociais</h2><div className="form-grid">{input("company_name", "Nome da empresa")}{input("whatsapp", "WhatsApp")}{input("phone", "Telefone")}{input("email", "E-mail")}{input("instagram", "Instagram")}{input("facebook", "Facebook")}{input("linkedin", "LinkedIn")}{input("youtube", "YouTube")}{input("tiktok", "TikTok")}</div><button className="gold-button" onClick={saveSettings}><Save /> Salvar dados</button></section>
     <section className="admin-card"><h2>A Imobiliária e Nossa Equipe</h2><p>Edite os textos apresentados na página institucional.</p><div className="institutional-settings">{input("about_title", "Título sobre a imobiliária")}{textarea("about_text", "Texto sobre a imobiliária")}{input("team_title", "Título da equipe")}{textarea("team_text", "Texto sobre a equipe")}</div><button className="gold-button" onClick={saveSettings}><Save /> Salvar textos</button></section>
+    <HeroVideoManager settings={settings} notify={notify} onChanged={refreshHeroSettings} />
     <InstitutionalImageCreator section="company" title="Fotos da Imobiliária" items={(contentQuery.data?.institutional_images ?? []).filter((item) => item.section === "company")} notify={notify} onChanged={() => { queryClient.invalidateQueries({ queryKey: ["admin-public-content"] }); queryClient.invalidateQueries({ queryKey: ["public-content"] }); }} />
     <InstitutionalImageCreator section="team" title="Nossa Equipe" items={(contentQuery.data?.institutional_images ?? []).filter((item) => item.section === "team")} notify={notify} onChanged={() => { queryClient.invalidateQueries({ queryKey: ["admin-public-content"] }); queryClient.invalidateQueries({ queryKey: ["public-content"] }); }} />
     <HeaderCreator onCreated={() => { queryClient.invalidateQueries({ queryKey: ["admin-public-content"] }); queryClient.invalidateQueries({ queryKey: ["public-content"] }); }} notify={notify} items={contentQuery.data?.hero_slides ?? []} onDelete={(id) => removeItem("hero-slides", id)} onToggle={(item) => toggleItem("hero-slides", item)} onMove={(items, index, amount) => moveItem("hero-slides", items, index, amount)} />
     <TestimonialCreator onCreated={() => { queryClient.invalidateQueries({ queryKey: ["admin-public-content"] }); queryClient.invalidateQueries({ queryKey: ["public-content"] }); }} notify={notify} items={contentQuery.data?.testimonials ?? []} onDelete={(id) => removeItem("testimonials", id)} onToggle={(item) => toggleItem("testimonials", item)} onMove={(items, index, amount) => moveItem("testimonials", items, index, amount)} />
     <ContentCreator title="Perguntas frequentes" fields={[["question", "Pergunta"], ["answer", "Resposta"], ["position", "Ordem"]]} onCreate={(payload) => createItem("faqs", { ...payload, active: true })} items={contentQuery.data?.faqs ?? []} onDelete={(id) => removeItem("faqs", id)} onToggle={(item) => toggleItem("faqs", item)} onMove={(items, index, amount) => moveItem("faqs", items, index, amount)} />
   </div>;
+}
+
+function HeroVideoManager({ settings, notify, onChanged }: { settings: SiteSettings & { id?: string }; notify: (message: string, error?: boolean) => void; onChanged: (settings: SiteSettings & { id?: string }) => void }) {
+  const [video, setVideo] = useState<File | null>(null);
+  const [poster, setPoster] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const preview = video ? URL.createObjectURL(video) : settings.hero_video_src;
+  const posterPreview = poster ? URL.createObjectURL(poster) : settings.hero_poster_src;
+  const upload = async () => {
+    if (!video) return notify("Selecione um vídeo MP4 para o fundo da Home.", true);
+    setBusy(true);
+    try {
+      const body = new FormData();
+      body.append("hero_video", video);
+      if (poster) body.append("hero_poster", poster);
+      body.append("hero_video_enabled", "true");
+      const response = settings.id
+        ? await api.patch(`/admin/content/${settings.id}/`, body, { headers: { "Content-Type": "multipart/form-data" } })
+        : await api.post("/admin/content/", body, { headers: { "Content-Type": "multipart/form-data" } });
+      setVideo(null); setPoster(null); onChanged(response.data);
+      notify("Vídeo de fundo atualizado e ativado na Home.");
+    } catch (error) { notify(friendlyApiError(error), true); }
+    finally { setBusy(false); }
+  };
+  const toggle = async () => {
+    if (!settings.id) return;
+    try {
+      const response = await api.patch(`/admin/content/${settings.id}/`, { hero_video_enabled: !settings.hero_video_enabled });
+      onChanged(response.data);
+      notify(settings.hero_video_enabled ? "Vídeo de fundo pausado. A imagem de fallback será exibida." : "Vídeo de fundo ativado.");
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const clear = async () => {
+    if (!settings.id || !settings.hero_video_src || !window.confirm("Excluir o vídeo de fundo e a capa cadastrada?")) return;
+    try {
+      const response = await api.post(`/admin/content/${settings.id}/clear-hero-video/`);
+      onChanged(response.data); setVideo(null); setPoster(null);
+      notify("Vídeo de fundo removido. As imagens do Header voltaram a ser usadas.");
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  return <section className="admin-card hero-video-manager">
+    <div className="hero-video-admin-head"><div><h2>Vídeo de fundo da Home</h2><p>Envie um MP4 horizontal. Ele será reproduzido sem som, em loop, atrás dos filtros. Limite: 100 MB.</p></div>{settings.hero_video_src && <i className={settings.hero_video_enabled ? "enabled" : ""}>{settings.hero_video_enabled ? "Ativo" : "Pausado"}</i>}</div>
+    <div className="hero-video-admin-grid">
+      <div className="hero-video-preview">{preview ? <video key={preview} src={preview} poster={posterPreview} muted loop playsInline controls /> : <div><Upload /><b>Nenhum vídeo cadastrado</b><span>A Home continua usando as imagens do Header.</span></div>}</div>
+      <div className="hero-video-fields">
+        <label className="header-drop"><Upload /><b>{video ? video.name : "Selecionar vídeo MP4"}</b><span>Prefira vídeos horizontais, curtos e otimizados para web.</span><input type="file" accept="video/mp4" disabled={busy} onChange={(event) => setVideo(event.target.files?.[0] ?? null)} /></label>
+        <label className="header-drop compact"><ImagePlus /><b>{poster ? poster.name : "Imagem de capa (opcional)"}</b><span>Mostrada enquanto o vídeo carrega ou se não puder reproduzir.</span><input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={(event) => setPoster(event.target.files?.[0] ?? null)} /></label>
+      </div>
+    </div>
+    <div className="hero-video-actions"><button className="gold-button" disabled={busy || !video} onClick={upload}>{busy ? "Enviando vídeo..." : <><Upload /> Salvar e ativar vídeo</>}</button>{settings.hero_video_src && <button className="outline" onClick={toggle}>{settings.hero_video_enabled ? "Pausar vídeo" : "Ativar vídeo"}</button>}{settings.hero_video_src && <button className="outline danger-action" onClick={clear}><Trash2 /> Excluir vídeo</button>}</div>
+  </section>;
 }
 
 function InstitutionalImageCreator({ section, title, items, notify, onChanged }: { section: "company" | "team"; title: string; items: InstitutionalImage[]; notify: (message: string, error?: boolean) => void; onChanged: () => void }) {

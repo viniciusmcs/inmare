@@ -1,3 +1,4 @@
+import os
 import re
 from rest_framework import serializers
 from .media_utils import normalize_uploaded_image
@@ -165,7 +166,35 @@ class BrokerSerializer(serializers.ModelSerializer):
 class ImportJobSerializer(serializers.ModelSerializer):
     class Meta: model = ImportJob; fields = "__all__"
 class SiteSettingsSerializer(serializers.ModelSerializer):
-    class Meta: model = SiteSettings; fields = "__all__"
+    hero_video_src = serializers.SerializerMethodField()
+    hero_poster_src = serializers.SerializerMethodField()
+    class Meta:
+        model = SiteSettings
+        fields = "__all__"
+        extra_kwargs = {
+            "hero_video": {"write_only": True, "required": False},
+            "hero_poster": {"write_only": True, "required": False},
+        }
+    def get_hero_video_src(self, obj): return obj.hero_video.url if obj.hero_video else ""
+    def get_hero_poster_src(self, obj): return obj.hero_poster.url if obj.hero_poster else ""
+    def validate_hero_video(self, video):
+        if not video:
+            return video
+        if video.size > 100 * 1024 * 1024:
+            raise serializers.ValidationError("O vídeo de fundo deve ter no máximo 100 MB.")
+        extension = os.path.splitext(video.name)[1].lower()
+        if extension != ".mp4":
+            raise serializers.ValidationError("Envie o vídeo de fundo no formato MP4.")
+        mime_type = (video.content_type or "").lower()
+        if mime_type != "video/mp4":
+            raise serializers.ValidationError("O tipo do arquivo não corresponde a um vídeo MP4.")
+        signature = video.read(16)
+        video.seek(0)
+        if len(signature) < 12 or signature[4:8] != b"ftyp":
+            raise serializers.ValidationError("O arquivo MP4 é inválido ou está corrompido.")
+        return video
+    def validate_hero_poster(self, image):
+        return normalize_uploaded_image(image, max_bytes=12 * 1024 * 1024)
 class HeroSlideSerializer(serializers.ModelSerializer):
     image_src = serializers.SerializerMethodField()
     active = serializers.BooleanField(default=True)

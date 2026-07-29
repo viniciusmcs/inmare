@@ -106,6 +106,9 @@ export type SiteSettings = {
   about_text?: string;
   team_title?: string;
   team_text?: string;
+  hero_video_src?: string;
+  hero_poster_src?: string;
+  hero_video_enabled?: boolean;
 };
 export type HeroSlide = { id: string; title: string; subtitle: string; image_src: string; link_url: string; link_label: string; active?: boolean; position?: number };
 export type Testimonial = { id: string; name: string; role: string; text: string; photo_src?: string; active?: boolean; position?: number };

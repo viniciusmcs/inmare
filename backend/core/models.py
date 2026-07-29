@@ -272,6 +272,9 @@ class SiteSettings(TimeStamped):
     about_text = models.TextField(blank=True, default="Nascemos com o propósito de transformar o mercado imobiliário através de confiança, tranquilidade e experiências memoráveis.")
     team_title = models.CharField(max_length=200, default="Nossa Equipe")
     team_text = models.TextField(blank=True, default="Profissionais preparados para entender seus objetivos e cuidar de cada detalhe da sua jornada imobiliária.")
+    hero_video = models.FileField(upload_to="content/hero-video/%Y/%m/", blank=True)
+    hero_poster = models.ImageField(upload_to="content/hero-video/%Y/%m/", blank=True)
+    hero_video_enabled = models.BooleanField(default=False)
 
 
 class InstitutionalImage(TimeStamped):

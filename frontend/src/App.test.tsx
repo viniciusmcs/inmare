@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { expect, test } from "vitest";
-import App from "./App";
+import App, { HeroExperience } from "./App";
 import { MediaCarousel } from "./components";
 test("renders premium home", () => {
   render(
@@ -34,4 +34,20 @@ test("uses the mobile fullscreen fallback when the native API is unavailable", (
   expect(container.querySelector(".detail-gallery")).toHaveClass("is-fullscreen");
   fireEvent.click(screen.getByRole("button", { name: "Sair da tela cheia" }));
   expect(container.querySelector(".detail-gallery")).not.toHaveClass("is-fullscreen");
+});
+
+test("renders the configured home background video with a poster", () => {
+  const { container } = render(
+    <MemoryRouter>
+      <HeroExperience
+        content={{ hero_slides: [], testimonials: [], faqs: [], institutional_images: [] }}
+        settings={{ hero_video_enabled: true, hero_video_src: "/media/hero.mp4", hero_poster_src: "/media/poster.jpg" }}
+        properties={[]}
+      />
+    </MemoryRouter>,
+  );
+  const video = container.querySelector(".hero-background-video");
+  expect(video).toHaveAttribute("src", "/media/hero.mp4");
+  expect(video).toHaveAttribute("poster", "/media/poster.jpg");
+  expect(container.querySelector(".hero-search-bar")).toBeInTheDocument();
 });
