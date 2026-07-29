@@ -19,7 +19,7 @@ export function HeroExperience({ content, settings, properties }: { content?: Pu
   const [index, setIndex] = useState(0);
   const [videoFailed, setVideoFailed] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const fillVideoRef = useRef<HTMLVideoElement>(null);
+  const videoCanvasRef = useRef<HTMLCanvasElement>(null);
   const hasVideo = Boolean(settings?.hero_video_enabled && settings.hero_video_src && !videoFailed);
   useEffect(() => {
     setVideoFailed(false);
@@ -32,35 +32,88 @@ export function HeroExperience({ content, settings, properties }: { content?: Pu
   useEffect(() => {
     const preference = window.matchMedia?.("(prefers-reduced-motion: reduce)");
     const syncPlayback = () => {
-      const videos = [videoRef.current, fillVideoRef.current].filter(Boolean) as HTMLVideoElement[];
-      if (!videos.length) return;
-      if (preference?.matches) videos.forEach((video) => video.pause());
-      else videos.forEach((video) => {
+      if (!videoRef.current) return;
+      if (preference?.matches) videoRef.current.pause();
+      else {
         try {
-          const playback = video.play();
+          const playback = videoRef.current.play();
           playback?.catch(() => undefined);
         } catch {
           // A imagem de capa continua visível quando o navegador bloqueia autoplay.
         }
-      });
+      }
     };
-    if (preference?.matches) [videoRef.current, fillVideoRef.current].forEach((video) => video?.pause());
+    if (preference?.matches) videoRef.current?.pause();
     preference?.addEventListener?.("change", syncPlayback);
     return () => preference?.removeEventListener?.("change", syncPlayback);
   }, [hasVideo, settings?.hero_video_src]);
-  const syncVideoLayers = () => {
+  useEffect(() => {
     const video = videoRef.current;
-    const fillVideo = fillVideoRef.current;
-    if (!video || !fillVideo || Math.abs(video.currentTime - fillVideo.currentTime) < 0.18) return;
-    fillVideo.currentTime = video.currentTime;
-  };
+    const canvas = videoCanvasRef.current;
+    if (!hasVideo || !video || !canvas || !window.matchMedia) return;
+    const mobile = window.matchMedia("(max-width: 680px)");
+    const foreground = document.createElement("canvas");
+    const foregroundContext = foreground.getContext("2d");
+    const context = canvas.getContext("2d");
+    let animationFrame = 0;
+    let lastDraw = 0;
+    const draw = () => {
+      if (!mobile.matches || !context || !foregroundContext || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+      const width = Math.max(1, Math.round(canvas.clientWidth));
+      const height = Math.max(1, Math.round(canvas.clientHeight));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        foreground.width = width;
+        foreground.height = height;
+      }
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = "#061b32";
+      context.fillRect(0, 0, width, height);
+      const coverScale = Math.max(width / video.videoWidth, height / video.videoHeight) * 1.08;
+      const coverWidth = video.videoWidth * coverScale;
+      const coverHeight = video.videoHeight * coverScale;
+      context.filter = "blur(18px)";
+      context.globalAlpha = 0.72;
+      context.drawImage(video, (width - coverWidth) / 2, (height - coverHeight) / 2, coverWidth, coverHeight);
+      context.filter = "none";
+      context.globalAlpha = 1;
+
+      foregroundContext.clearRect(0, 0, width, height);
+      foregroundContext.globalCompositeOperation = "source-over";
+      const containScale = Math.min(width / video.videoWidth, height / video.videoHeight);
+      const containWidth = video.videoWidth * containScale;
+      const containHeight = video.videoHeight * containScale;
+      const containX = (width - containWidth) / 2;
+      const containY = (height - containHeight) / 2;
+      foregroundContext.drawImage(video, containX, containY, containWidth, containHeight);
+      foregroundContext.globalCompositeOperation = "destination-in";
+      const mask = foregroundContext.createLinearGradient(0, containY, 0, containY + containHeight);
+      mask.addColorStop(0, "transparent");
+      mask.addColorStop(0.1, "#000");
+      mask.addColorStop(0.9, "#000");
+      mask.addColorStop(1, "transparent");
+      foregroundContext.fillStyle = mask;
+      foregroundContext.fillRect(containX, containY, containWidth, containHeight);
+      foregroundContext.globalCompositeOperation = "source-over";
+      context.drawImage(foreground, 0, 0);
+    };
+    const render = (timestamp: number) => {
+      animationFrame = window.requestAnimationFrame(render);
+      if (timestamp - lastDraw < 40) return;
+      lastDraw = timestamp;
+      draw();
+    };
+    animationFrame = window.requestAnimationFrame(render);
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [hasVideo, settings?.hero_video_src]);
   const slide = slides[index];
   const poster = settings?.hero_poster_src || slide.image_src;
   return <div className="home-hero-stage">
     <section className={`hero home-video-hero ${hasVideo ? "is-video" : ""}`} style={{ backgroundImage: `url("${poster}")` }}>
       {hasVideo && <>
-        <video ref={fillVideoRef} className="hero-background-video hero-background-video-fill" src={settings?.hero_video_src} poster={poster} autoPlay muted loop playsInline preload="metadata" aria-hidden="true" />
-        <video ref={videoRef} className="hero-background-video hero-background-video-fit" src={settings?.hero_video_src} poster={poster} autoPlay muted loop playsInline preload="metadata" onTimeUpdate={syncVideoLayers} onError={() => setVideoFailed(true)} />
+        <video ref={videoRef} className="hero-background-video" src={settings?.hero_video_src} poster={poster} autoPlay muted loop playsInline preload="metadata" onError={() => setVideoFailed(true)} />
+        <canvas ref={videoCanvasRef} className="hero-video-canvas" aria-hidden="true" />
       </>}
       <div className="hero-video-shade" />
       {!hasVideo && slides.length > 1 && <div className="hero-dots">{slides.map((item, itemIndex) => <button aria-label={`Banner ${itemIndex + 1}`} className={itemIndex === index ? "active" : ""} key={item.id} onClick={() => setIndex(itemIndex)} />)}</div>}

@@ -523,8 +523,7 @@ footer img{width:176px;height:154px;object-fit:contain;object-position:left cent
 .home-video-hero{min-height:760px;height:min(100svh,900px);padding:0;overflow:hidden;background-position:center;background-size:cover;display:block}
 .home-video-hero>div{max-width:none}
 .hero-background-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;z-index:0}
-.hero-background-video-fill{display:none}
-.hero-background-video-fit{z-index:1}
+.hero-video-canvas{display:none;position:absolute;inset:0;width:100%;height:100%;z-index:1}
 .hero-video-shade{position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,#03162a99 0%,#03162a20 35%,#03162a40 60%,#03162acc 100%)}
 .hero-video-copy{position:absolute;z-index:2;top:29%;left:50%;width:min(900px,88vw);transform:translate(-50%,-50%);text-align:center;text-shadow:0 3px 24px #000}
 .hero-video-copy h1{font-size:58px;line-height:1;margin:12px 0}
@@ -565,8 +564,8 @@ footer img{width:176px;height:154px;object-fit:contain;object-position:left cent
 }
 @media(max-width:680px){
   .home-video-hero{min-height:760px;height:max(100svh,760px)}
-  .hero-background-video-fill{display:block;object-fit:cover;filter:blur(18px);opacity:.72;transform:scale(1.08)}
-  .hero-background-video-fit{inset:auto 0;top:50%;height:auto;object-fit:contain;object-position:center;background:transparent;transform:translateY(-50%);-webkit-mask-image:linear-gradient(to bottom,transparent,#000 10%,#000 90%,transparent);mask-image:linear-gradient(to bottom,transparent,#000 10%,#000 90%,transparent)}
+  .hero-background-video{opacity:0}
+  .hero-video-canvas{display:block}
   .hero-video-shade{background:linear-gradient(180deg,#03162a8c 0%,#03162a24 25%,#03162a66 50%,#03162ae8 100%)}
   .hero-video-copy{top:18%;width:calc(100% - 32px)}
   .hero-video-copy small{font-size:10px}
@@ -587,7 +586,7 @@ footer img{width:176px;height:154px;object-fit:contain;object-position:left cent
   .hero-video-actions>button{width:100%}
 }
 @media(prefers-reduced-motion:reduce){
-  .hero-background-video{display:none}
+  .hero-background-video,.hero-video-canvas{display:none}
   .home-video-hero{background-position:center}
 }
 
