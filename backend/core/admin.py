@@ -1,3 +1,3 @@
 from django.contrib import admin
-from .models import AuditEvent, Broker, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial
-admin.site.register([Property, ListingOption, Media, Development, Broker, Lead, ImportJob, AuditEvent, SiteSettings, HeroSlide, InstitutionalImage, Testimonial, FrequentlyAskedQuestion])
+from .models import AuditEvent, Broker, CRMActivity, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMPropertyLink, CRMTask, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial
+admin.site.register([Property, ListingOption, Media, Development, Broker, Lead, ImportJob, AuditEvent, SiteSettings, HeroSlide, InstitutionalImage, Testimonial, FrequentlyAskedQuestion, CRMContact, CRMPropertyLink, CRMOpportunity, CRMTask, CRMNotification, CRMActivity, CRMProposal, CRMImportBatch, CRMImportRow])

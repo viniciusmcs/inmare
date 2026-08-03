@@ -13,7 +13,8 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
-from core.models import AuditEvent, FrequentlyAskedQuestion, HeroSlide, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial as CustomerTestimonial
+from django.test import override_settings
+from core.models import AuditEvent, Broker, CRMActivity, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMPropertyLink, CRMTask, FrequentlyAskedQuestion, HeroSlide, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial as CustomerTestimonial
 from core.media_utils import normalize_uploaded_image
 from core.services import extract_property_description, import_property_folder, validate_and_extract_zip
 
@@ -854,3 +855,279 @@ def test_visit_request_requires_future_date_and_records_preference():
     assert created.status_code == 201
     assert created.data["preferred_visit_period"] == "Tarde"
     assert created.data["property_title"] == "Casa Visita"
+
+
+def test_public_lead_enters_crm_without_exposing_crm_publicly():
+    prop = Property.objects.create(
+        title="Casa CRM", slug="casa-crm", city="X", neighborhood="Y",
+        status=Property.Status.AVAILABLE, published=True,
+    )
+    client = APIClient()
+    created = client.post("/api/v1/public/leads/", {
+        "name": "Maria Cliente", "phone": "(51) 99999-0000", "email": "MARIA@example.com",
+        "message": "Tenho interesse", "origin": "contact", "property_public_id": prop.public_id,
+        "consent": True,
+    }, format="json")
+    assert created.status_code == 201
+    contact = CRMContact.objects.get()
+    opportunity = CRMOpportunity.objects.get()
+    assert contact.normalized_phone == "5551999990000"
+    assert contact.normalized_email == "maria@example.com"
+    assert opportunity.contact == contact
+    assert opportunity.property == prop
+    assert str(opportunity.source_lead_id) == created.data["id"]
+    assert CRMActivity.objects.filter(contact=contact).exists()
+    assert client.get("/api/v1/admin/crm/contacts/").status_code == 401
+
+
+def test_admin_crm_rejects_duplicate_contact_phone_or_email():
+    admin = get_user_model().objects.create_superuser("crm-admin", "crm-admin@example.com", "secret")
+    client = APIClient(); client.force_authenticate(admin)
+    first = client.post("/api/v1/admin/crm/contacts/", {
+        "name": "Cliente Um", "phone": "51 99999-1111", "email": "cliente@example.com",
+        "profile": "buyer",
+    }, format="json")
+    assert first.status_code == 201
+    duplicate = client.post("/api/v1/admin/crm/contacts/", {
+        "name": "Cliente Duplicado", "phone": "(51) 99999-1111", "email": "outro@example.com",
+    }, format="json")
+    assert duplicate.status_code == 400
+    assert CRMContact.objects.count() == 1
+
+
+@override_settings(MEDIA_ROOT=tempfile.gettempdir())
+def test_crm_csv_import_stays_in_review_then_links_owner_on_commit():
+    admin = get_user_model().objects.create_superuser("import-admin", "import@example.com", "secret")
+    client = APIClient(); client.force_authenticate(admin)
+    csv_data = (
+        "Nome;CPF;Celular;Email;Endereço;Cidade;UF;CEP;Lote;Condomínio\n"
+        "Cliente Riviera;123.456.789-01;(51) 99999-1234;cliente@example.com;Rua Um, 10;Xangri-Lá;RS;95588-000;Q01 L01;Riviera\n"
+    ).encode("utf-8")
+    preview = client.post("/api/v1/admin/crm/imports/", {
+        "file": SimpleUploadedFile("clientes.csv", csv_data, content_type="text/csv"),
+        "source_label": "Base Riviera 2024",
+    }, format="multipart")
+    assert preview.status_code == 201
+    assert preview.data["status"] == CRMImportBatch.Status.REVIEW
+    assert preview.data["total_rows"] == 1
+    assert CRMContact.objects.count() == 0
+    batch = CRMImportBatch.objects.get()
+    row = CRMImportRow.objects.get(batch=batch)
+    assert row.status == CRMImportRow.Status.VALID
+    committed = client.post(f"/api/v1/admin/crm/imports/{batch.id}/commit/")
+    assert committed.status_code == 200
+    assert committed.data["imported_rows"] == 1
+    contact = CRMContact.objects.get()
+    assert contact.profile == CRMContact.Profile.OWNER
+    link = CRMPropertyLink.objects.get(contact=contact)
+    assert link.unit_reference == "Q01 L01"
+    assert link.development_name == "Riviera"
+    batch.refresh_from_db()
+    assert batch.status == CRMImportBatch.Status.COMMITTED
+    assert batch.file.storage.exists(batch.file.name)
+
+
+def test_crm_opportunity_stage_change_and_proposal_validation():
+    admin = get_user_model().objects.create_superuser("sales-admin", "sales@example.com", "secret")
+    client = APIClient(); client.force_authenticate(admin)
+    contact = CRMContact.objects.create(name="Comprador", phone="51999990000")
+    opportunity = CRMOpportunity.objects.create(contact=contact, title="Negociação Riviera")
+    moved = client.patch(
+        f"/api/v1/admin/crm/opportunities/{opportunity.id}/",
+        {"stage": CRMOpportunity.Stage.PROPOSAL},
+        format="json",
+    )
+    assert moved.status_code == 200
+    assert CRMActivity.objects.filter(opportunity=opportunity, kind=CRMActivity.Kind.STAGE_CHANGE).exists()
+    invalid = client.post("/api/v1/admin/crm/proposals/", {
+        "opportunity": str(opportunity.id), "total_value": "100000.00",
+        "down_payment": "80000.00", "financing_value": "30000.00",
+    }, format="json")
+    assert invalid.status_code == 400
+
+
+@override_settings(MEDIA_ROOT=tempfile.gettempdir())
+def test_crm_import_cannot_commit_unreviewed_errors():
+    admin = get_user_model().objects.create_superuser("review-admin", "review@example.com", "secret")
+    client = APIClient(); client.force_authenticate(admin)
+    csv_data = "Nome;CPF;Email\n;123;email-invalido\n".encode()
+    preview = client.post("/api/v1/admin/crm/imports/", {
+        "file": SimpleUploadedFile("erros.csv", csv_data, content_type="text/csv"),
+    }, format="multipart")
+    assert preview.status_code == 201
+    batch = CRMImportBatch.objects.get()
+    assert batch.error_rows == 1
+    blocked = client.post(f"/api/v1/admin/crm/imports/{batch.id}/commit/")
+    assert blocked.status_code == 400
+    assert batch.rows.get().status == CRMImportRow.Status.ERROR
+
+
+@override_settings(MEDIA_ROOT=tempfile.gettempdir())
+def test_crm_import_can_ignore_all_invalid_rows():
+    admin = get_user_model().objects.create_superuser("ignore-admin", "ignore@example.com", "secret")
+    client = APIClient(); client.force_authenticate(admin)
+    csv_data = "Nome;CPF;Email\n;123;email-invalido\n".encode()
+    preview = client.post("/api/v1/admin/crm/imports/", {
+        "file": SimpleUploadedFile("invalidos.csv", csv_data, content_type="text/csv"),
+    }, format="multipart")
+    batch = CRMImportBatch.objects.get(pk=preview.data["id"])
+
+    ignored = client.post(f"/api/v1/admin/crm/imports/{batch.id}/ignore-invalid/")
+
+    assert ignored.status_code == 200
+    assert ignored.data["ignored_rows"] == 1
+    assert ignored.data["batch"]["error_rows"] == 0
+    assert batch.rows.get().status == CRMImportRow.Status.IGNORED
+    committed = client.post(f"/api/v1/admin/crm/imports/{batch.id}/commit/")
+    assert committed.status_code == 200
+    assert committed.data["imported_rows"] == 0
+
+
+@override_settings(MEDIA_ROOT=tempfile.gettempdir())
+def test_crm_same_file_can_be_reuploaded_without_duplicate_contacts():
+    admin = get_user_model().objects.create_superuser("repeat-admin", "repeat@example.com", "secret")
+    client = APIClient(); client.force_authenticate(admin)
+    csv_data = (
+        "Nome;CPF;Celular;Email;Lote;Condomínio\n"
+        "Cliente Único;123.456.789-01;(51) 99999-1234;unico@example.com;Q01 L01;Riviera\n"
+    ).encode("utf-8")
+
+    first = client.post("/api/v1/admin/crm/imports/", {
+        "file": SimpleUploadedFile("clientes.csv", csv_data, content_type="text/csv"),
+    }, format="multipart")
+    assert first.status_code == 201
+    assert client.post(f"/api/v1/admin/crm/imports/{first.data['id']}/commit/").data["imported_rows"] == 1
+
+    second = client.post("/api/v1/admin/crm/imports/", {
+        "file": SimpleUploadedFile("clientes.csv", csv_data, content_type="text/csv"),
+    }, format="multipart")
+    assert second.status_code == 201
+    assert second.data["duplicate_rows"] == 1
+    assert CRMImportRow.objects.get(batch_id=second.data["id"]).status == CRMImportRow.Status.DUPLICATE
+    committed = client.post(f"/api/v1/admin/crm/imports/{second.data['id']}/commit/")
+    assert committed.status_code == 200
+    assert committed.data["imported_rows"] == 0
+    assert CRMContact.objects.count() == 1
+
+
+@override_settings(MEDIA_ROOT=tempfile.gettempdir())
+def test_crm_duplicate_owner_inside_file_creates_one_contact_and_keeps_units():
+    admin = get_user_model().objects.create_superuser("units-admin", "units@example.com", "secret")
+    client = APIClient(); client.force_authenticate(admin)
+    csv_data = (
+        "Nome;CPF;Celular;Email;Lote;Condomínio\n"
+        "Proprietário Dois Lotes;987.654.321-00;(51) 98888-7777;owner@example.com;Q01 L01;Riviera\n"
+        "Proprietário Dois Lotes;987.654.321-00;(51) 98888-7777;owner@example.com;Q02 L02;Riviera\n"
+    ).encode("utf-8")
+    preview = client.post("/api/v1/admin/crm/imports/", {
+        "file": SimpleUploadedFile("dois-lotes.csv", csv_data, content_type="text/csv"),
+    }, format="multipart")
+
+    assert preview.status_code == 201
+    assert preview.data["valid_rows"] == 1
+    assert preview.data["duplicate_rows"] == 1
+    committed = client.post(f"/api/v1/admin/crm/imports/{preview.data['id']}/commit/")
+    assert committed.data["imported_rows"] == 1
+    assert CRMContact.objects.count() == 1
+    assert set(CRMPropertyLink.objects.values_list("unit_reference", flat=True)) == {"Q01 L01", "Q02 L02"}
+
+
+def test_admin_can_create_broker_login_and_broker_can_authenticate():
+    admin = get_user_model().objects.create_superuser("team-admin", "team@example.com", "secret")
+    client = APIClient(); client.force_authenticate(admin)
+    created = client.post("/api/v1/admin/brokers/", {
+        "name": "Corretora Maria", "email": "maria@example.com", "role": "broker",
+        "username": "maria.corretora", "password": "SenhaForte123", "active": True,
+    }, format="json")
+    assert created.status_code == 201
+    broker = Broker.objects.get()
+    assert broker.user.username == "maria.corretora"
+    assert not broker.user.is_staff
+
+    anonymous = APIClient()
+    login = anonymous.post("/api/v1/admin/auth/login/", {"username": "maria.corretora", "password": "SenhaForte123"}, format="json")
+    assert login.status_code == 200
+    assert login.data["user"]["role"] == "broker"
+    assert login.data["user"]["can_manage_site"] is False
+
+
+def test_broker_only_accesses_own_crm_portfolio_and_cannot_import():
+    first_user = get_user_model().objects.create_user("broker-one", password="secret")
+    second_user = get_user_model().objects.create_user("broker-two", password="secret")
+    first = Broker.objects.create(name="Primeiro", user=first_user)
+    second = Broker.objects.create(name="Segundo", user=second_user)
+    own_contact = CRMContact.objects.create(name="Cliente próprio", assigned_broker=first)
+    other_contact = CRMContact.objects.create(name="Cliente alheio", assigned_broker=second)
+    CRMOpportunity.objects.create(contact=own_contact, broker=first, title="Carteira própria")
+    CRMOpportunity.objects.create(contact=other_contact, broker=second, title="Carteira alheia")
+    client = APIClient(); client.force_authenticate(first_user)
+
+    contacts = client.get("/api/v1/admin/crm/contacts/")
+    opportunities = client.get("/api/v1/admin/crm/opportunities/")
+
+    assert [item["name"] for item in contacts.data["results"]] == ["Cliente próprio"]
+    assert [item["title"] for item in opportunities.data["results"]] == ["Carteira própria"]
+    forbidden_contact = client.post("/api/v1/admin/crm/opportunities/", {
+        "contact": str(other_contact.id), "title": "Tentativa indevida", "stage": "new",
+    }, format="json")
+    assert forbidden_contact.status_code == 400
+    assert client.get("/api/v1/admin/crm/imports/").status_code == 403
+
+
+def test_manager_sees_full_crm_but_not_site_administration():
+    manager_user = get_user_model().objects.create_user("sales-manager", password="secret")
+    Broker.objects.create(name="Gestora", user=manager_user, role=Broker.Role.MANAGER)
+    CRMContact.objects.create(name="Sem responsável")
+    client = APIClient(); client.force_authenticate(manager_user)
+
+    assert client.get("/api/v1/admin/crm/contacts/").data["count"] == 1
+    assert client.get("/api/v1/admin/crm/imports/").status_code == 200
+    assert client.get("/api/v1/admin/properties/").status_code == 403
+
+
+def test_internal_notifications_are_generated_for_due_and_overdue_tasks():
+    user = get_user_model().objects.create_user("notification-broker", password="secret")
+    broker = Broker.objects.create(name="Corretor Avisado", user=user)
+    contact = CRMContact.objects.create(name="Cliente Aviso", assigned_broker=broker)
+    CRMTask.objects.create(
+        contact=contact, broker=broker, title="Retornar cliente",
+        due_at=timezone.now() + timedelta(hours=2),
+    )
+    CRMTask.objects.create(
+        contact=contact, broker=broker, title="Tarefa vencida",
+        due_at=timezone.now() - timedelta(hours=2),
+    )
+    client = APIClient(); client.force_authenticate(user)
+
+    response = client.get("/api/v1/admin/crm/notifications/")
+
+    assert response.status_code == 200
+    assert response.data["count"] == 2
+    assert {item["kind"] for item in response.data["results"]} == {CRMNotification.Kind.TASK_DUE, CRMNotification.Kind.TASK_OVERDUE}
+    marked = client.post("/api/v1/admin/crm/notifications/mark-all-read/")
+    assert marked.data["updated"] == 2
+    assert not CRMNotification.objects.filter(read_at__isnull=True).exists()
+
+
+def test_crm_report_is_scoped_and_calculates_conversion_and_values():
+    user = get_user_model().objects.create_user("report-broker", password="secret")
+    broker = Broker.objects.create(name="Corretor Relatório", user=user)
+    contact = CRMContact.objects.create(name="Cliente Relatório", assigned_broker=broker)
+    CRMOpportunity.objects.create(
+        contact=contact, broker=broker, title="Venda concluída", stage=CRMOpportunity.Stage.WON,
+        expected_value="1500000.00", closed_at=timezone.now(), source="site",
+    )
+    CRMOpportunity.objects.create(
+        contact=contact, broker=broker, title="Venda perdida", stage=CRMOpportunity.Stage.LOST,
+        expected_value="900000.00", closed_at=timezone.now(), source="site", loss_reason="Preço",
+    )
+    client = APIClient(); client.force_authenticate(user)
+
+    response = client.get("/api/v1/admin/crm/reports/")
+
+    assert response.status_code == 200
+    assert response.data["metrics"]["new_opportunities"] == 2
+    assert response.data["metrics"]["won"] == 1
+    assert response.data["metrics"]["conversion_rate"] == 50.0
+    assert response.data["metrics"]["won_value"] == 1500000.0
+    assert response.data["broker_performance"][0]["broker_name"] == "Corretor Relatório"

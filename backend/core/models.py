@@ -29,10 +29,22 @@ class TimeStamped(models.Model):
 
 
 class Broker(TimeStamped):
+    class Role(models.TextChoices):
+        MANAGER = "manager", "Gestor comercial"
+        BROKER = "broker", "Corretor"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="crm_broker",
+    )
     name = models.CharField(max_length=160)
     phone = models.CharField(max_length=40, blank=True)
     email = models.EmailField(blank=True)
     whatsapp = models.CharField(max_length=40, blank=True)
+    role = models.CharField(max_length=20, choices=Role.choices, default=Role.BROKER, db_index=True)
     active = models.BooleanField(default=True)
     def __str__(self): return self.name
 
@@ -254,6 +266,294 @@ class Lead(TimeStamped):
     consent = models.BooleanField(default=False)
     preferred_visit_date = models.DateField(null=True, blank=True)
     preferred_visit_period = models.CharField(max_length=40, blank=True)
+
+
+def normalize_document(value):
+    digits = re.sub(r"\D", "", value or "")
+    return digits or None
+
+
+def normalize_phone(value):
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) in (10, 11):
+        digits = f"55{digits}"
+    return digits
+
+
+def normalize_email(value):
+    return re.sub(r"\s+", "", value or "").casefold()
+
+
+class CRMContact(TimeStamped):
+    class PersonType(models.TextChoices):
+        INDIVIDUAL = "individual", "Pessoa física"
+        COMPANY = "company", "Pessoa jurídica"
+
+    class Profile(models.TextChoices):
+        GENERAL = "general", "Contato"
+        OWNER = "owner", "Proprietário"
+        BUYER = "buyer", "Comprador"
+        SELLER = "seller", "Vendedor"
+        INVESTOR = "investor", "Investidor"
+        PARTNER = "partner", "Parceiro"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Ativo"
+        ARCHIVED = "archived", "Arquivado"
+
+    name = models.CharField(max_length=200, db_index=True)
+    person_type = models.CharField(max_length=20, choices=PersonType.choices, default=PersonType.INDIVIDUAL)
+    document = models.CharField(max_length=14, null=True, blank=True, unique=True)
+    phone = models.CharField(max_length=20, blank=True)
+    normalized_phone = models.CharField(max_length=20, blank=True, db_index=True, editable=False)
+    email = models.EmailField(blank=True)
+    normalized_email = models.CharField(max_length=254, blank=True, db_index=True, editable=False)
+    address = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=120, blank=True, db_index=True)
+    state = models.CharField(max_length=2, blank=True)
+    postal_code = models.CharField(max_length=8, blank=True)
+    profile = models.CharField(max_length=20, choices=Profile.choices, default=Profile.GENERAL, db_index=True)
+    source = models.CharField(max_length=80, default="manual", db_index=True)
+    source_detail = models.CharField(max_length=200, blank=True)
+    tags = models.JSONField(default=list, blank=True)
+    notes = models.TextField(blank=True)
+    assigned_broker = models.ForeignKey(Broker, null=True, blank=True, on_delete=models.SET_NULL, related_name="crm_contacts")
+    marketing_consent = models.BooleanField(default=False)
+    consent_at = models.DateTimeField(null=True, blank=True)
+    do_not_contact = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE, db_index=True)
+    last_contact_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["name", "created_at"]
+        indexes = [models.Index(fields=["status", "profile"])]
+
+    def save(self, *args, **kwargs):
+        self.name = " ".join(self.name.split())
+        self.document = normalize_document(self.document)
+        self.normalized_phone = normalize_phone(self.phone)
+        self.normalized_email = normalize_email(self.email)
+        self.postal_code = re.sub(r"\D", "", self.postal_code or "")
+        self.state = (self.state or "").strip().upper()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+
+class CRMPropertyLink(TimeStamped):
+    class Relationship(models.TextChoices):
+        OWNER = "owner", "Proprietário"
+        CO_OWNER = "co_owner", "Coproprietário"
+        INTERESTED = "interested", "Interessado"
+        REPRESENTATIVE = "representative", "Representante"
+
+    contact = models.ForeignKey(CRMContact, on_delete=models.CASCADE, related_name="property_links")
+    property = models.ForeignKey(Property, null=True, blank=True, on_delete=models.CASCADE, related_name="crm_contacts")
+    relationship = models.CharField(max_length=20, choices=Relationship.choices, default=Relationship.OWNER)
+    development_name = models.CharField(max_length=200, blank=True)
+    unit_reference = models.CharField(max_length=120, blank=True)
+    ownership_share = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    is_primary = models.BooleanField(default=True)
+    active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["development_name", "unit_reference", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["contact", "property", "relationship"],
+                condition=Q(property__isnull=False),
+                name="unique_crm_contact_property_relationship",
+            ),
+            models.UniqueConstraint(
+                fields=["contact", "development_name", "unit_reference", "relationship"],
+                condition=Q(property__isnull=True) & ~Q(unit_reference=""),
+                name="unique_crm_contact_external_unit",
+            ),
+        ]
+
+
+class CRMOpportunity(TimeStamped):
+    class Stage(models.TextChoices):
+        NEW = "new", "Lead recebido"
+        CONTACTED = "contacted", "Contato realizado"
+        VISIT = "visit", "Visita agendada"
+        PROPOSAL = "proposal", "Proposta enviada"
+        NEGOTIATION = "negotiation", "Negociação"
+        WON = "won", "Fechado"
+        LOST = "lost", "Perdido"
+        PAUSED = "paused", "Pausado"
+
+    contact = models.ForeignKey(CRMContact, on_delete=models.CASCADE, related_name="opportunities")
+    property = models.ForeignKey(Property, null=True, blank=True, on_delete=models.SET_NULL, related_name="crm_opportunities")
+    source_lead = models.OneToOneField(Lead, null=True, blank=True, on_delete=models.SET_NULL, related_name="crm_opportunity")
+    title = models.CharField(max_length=200)
+    stage = models.CharField(max_length=20, choices=Stage.choices, default=Stage.NEW, db_index=True)
+    broker = models.ForeignKey(Broker, null=True, blank=True, on_delete=models.SET_NULL, related_name="crm_opportunities")
+    expected_value = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    source = models.CharField(max_length=80, default="manual", db_index=True)
+    next_action_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    loss_reason = models.CharField(max_length=240, blank=True)
+    notes = models.TextField(blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        indexes = [models.Index(fields=["stage", "broker"])]
+
+
+class CRMTask(TimeStamped):
+    class Kind(models.TextChoices):
+        FOLLOW_UP = "follow_up", "Follow-up"
+        CALL = "call", "Ligação"
+        WHATSAPP = "whatsapp", "WhatsApp"
+        EMAIL = "email", "E-mail"
+        VISIT = "visit", "Visita"
+        OTHER = "other", "Outro"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pendente"
+        COMPLETED = "completed", "Concluída"
+        CANCELED = "canceled", "Cancelada"
+
+    contact = models.ForeignKey(CRMContact, on_delete=models.CASCADE, related_name="tasks")
+    opportunity = models.ForeignKey(CRMOpportunity, null=True, blank=True, on_delete=models.CASCADE, related_name="tasks")
+    property = models.ForeignKey(Property, null=True, blank=True, on_delete=models.SET_NULL, related_name="crm_tasks")
+    broker = models.ForeignKey(Broker, null=True, blank=True, on_delete=models.SET_NULL, related_name="crm_tasks")
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.FOLLOW_UP)
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    due_at = models.DateTimeField(db_index=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["due_at"]
+
+
+class CRMNotification(TimeStamped):
+    class Kind(models.TextChoices):
+        ASSIGNMENT = "assignment", "Nova atribuição"
+        TASK_DUE = "task_due", "Tarefa próxima"
+        TASK_OVERDUE = "task_overdue", "Tarefa atrasada"
+        OPPORTUNITY = "opportunity", "Oportunidade"
+        SYSTEM = "system", "Sistema"
+
+    class Priority(models.TextChoices):
+        LOW = "low", "Baixa"
+        NORMAL = "normal", "Normal"
+        HIGH = "high", "Alta"
+
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="crm_notifications")
+    broker = models.ForeignKey(Broker, null=True, blank=True, on_delete=models.CASCADE, related_name="notifications")
+    source_task = models.ForeignKey(CRMTask, null=True, blank=True, on_delete=models.CASCADE, related_name="notifications")
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.SYSTEM, db_index=True)
+    priority = models.CharField(max_length=20, choices=Priority.choices, default=Priority.NORMAL, db_index=True)
+    title = models.CharField(max_length=180)
+    message = models.TextField(blank=True)
+    link = models.CharField(max_length=240, blank=True)
+    unique_key = models.CharField(max_length=240, null=True, blank=True, unique=True)
+    read_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["recipient", "read_at", "created_at"])]
+
+
+class CRMActivity(TimeStamped):
+    class Kind(models.TextChoices):
+        NOTE = "note", "Observação"
+        CALL = "call", "Ligação"
+        WHATSAPP = "whatsapp", "WhatsApp"
+        EMAIL = "email", "E-mail"
+        VISIT = "visit", "Visita"
+        STAGE_CHANGE = "stage_change", "Mudança de etapa"
+        PROPOSAL = "proposal", "Proposta"
+        IMPORT = "import", "Importação"
+
+    contact = models.ForeignKey(CRMContact, on_delete=models.CASCADE, related_name="activities")
+    opportunity = models.ForeignKey(CRMOpportunity, null=True, blank=True, on_delete=models.CASCADE, related_name="activities")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.NOTE, db_index=True)
+    description = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class CRMProposal(TimeStamped):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Rascunho"
+        SENT = "sent", "Enviada"
+        ANALYSIS = "analysis", "Em análise"
+        COUNTER = "counter", "Contraproposta"
+        ACCEPTED = "accepted", "Aceita"
+        REJECTED = "rejected", "Recusada"
+        EXPIRED = "expired", "Expirada"
+
+    opportunity = models.ForeignKey(CRMOpportunity, on_delete=models.CASCADE, related_name="proposals")
+    version = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    total_value = models.DecimalField(max_digits=14, decimal_places=2)
+    down_payment = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    financing_value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    installments = models.JSONField(default=list, blank=True)
+    annual_reinforcements = models.JSONField(default=list, blank=True)
+    exchanges = models.JSONField(default=list, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-version", "-created_at"]
+        constraints = [models.UniqueConstraint(fields=["opportunity", "version"], name="unique_crm_proposal_version")]
+
+
+class CRMImportBatch(TimeStamped):
+    class Status(models.TextChoices):
+        PROCESSING = "processing", "Processando"
+        REVIEW = "review", "Aguardando revisão"
+        COMMITTED = "committed", "Importado"
+        FAILED = "failed", "Falhou"
+
+    file = models.FileField(upload_to="quarantine/crm-imports/%Y/%m/")
+    original_name = models.CharField(max_length=255)
+    source_hash = models.CharField(max_length=64, db_index=True)
+    source_label = models.CharField(max_length=160, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PROCESSING, db_index=True)
+    total_rows = models.PositiveIntegerField(default=0)
+    valid_rows = models.PositiveIntegerField(default=0)
+    duplicate_rows = models.PositiveIntegerField(default=0)
+    error_rows = models.PositiveIntegerField(default=0)
+    imported_rows = models.PositiveIntegerField(default=0)
+    errors = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class CRMImportRow(TimeStamped):
+    class Status(models.TextChoices):
+        VALID = "valid", "Pronto"
+        DUPLICATE = "duplicate", "Possível duplicidade"
+        ERROR = "error", "Com erro"
+        IMPORTED = "imported", "Importado"
+        IGNORED = "ignored", "Ignorado"
+
+    batch = models.ForeignKey(CRMImportBatch, on_delete=models.CASCADE, related_name="rows")
+    row_number = models.PositiveIntegerField()
+    raw_data = models.JSONField(default=dict)
+    normalized_data = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, choices=Status.choices, db_index=True)
+    errors = models.JSONField(default=list, blank=True)
+    matched_contact = models.ForeignKey(CRMContact, null=True, blank=True, on_delete=models.SET_NULL, related_name="import_rows")
+    matched_property = models.ForeignKey(Property, null=True, blank=True, on_delete=models.SET_NULL, related_name="crm_import_rows")
+
+    class Meta:
+        ordering = ["row_number"]
+        constraints = [models.UniqueConstraint(fields=["batch", "row_number"], name="unique_crm_import_row")]
 
 
 class SiteSettings(TimeStamped):

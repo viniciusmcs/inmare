@@ -5,11 +5,13 @@ import mimetypes
 from xml.sax.saxutils import escape
 from django.conf import settings as django_settings
 from django.db import connection, transaction
-from django.db.models import Max, Min, Q
+from django.db.models import Count, Max, Min, Q, Sum
+from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
@@ -18,9 +20,11 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import AuditEvent, Broker, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial, catalog_key
-from .serializers import AdminLeadSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, ListingOptionSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
+from .models import AuditEvent, Broker, CRMActivity, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMPropertyLink, CRMTask, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial, catalog_key
+from .serializers import AdminLeadSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, CRMActivitySerializer, CRMContactSerializer, CRMImportBatchSerializer, CRMImportRowSerializer, CRMNotificationSerializer, CRMOpportunitySerializer, CRMProposalSerializer, CRMPropertyLinkSerializer, CRMTaskSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, ListingOptionSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
 from .services import extract_property_description, import_property_folder, import_property_zip
+from .crm_services import commit_import_batch, file_sha256, find_duplicate_contact, find_duplicate_import_row, process_import_batch, sanitize_import_row, validate_crm_import
+from .crm_permissions import IsCRMManager, IsCRMUser, can_view_all_crm, crm_user_payload, user_broker
 from .media_utils import normalize_uploaded_image
 
 class LeadThrottle(AnonRateThrottle): scope = "lead"
@@ -88,13 +92,20 @@ class LoginView(APIView):
     def post(self, request):
         from django.contrib.auth import authenticate
         user = authenticate(username=request.data.get("username"), password=request.data.get("password"))
-        if not user or not user.is_staff: return Response({"detail": "Credenciais inválidas."}, status=401)
+        if not user or not (user.is_staff or user_broker(user)): return Response({"detail": "Credenciais inválidas."}, status=401)
         refresh = RefreshToken.for_user(user)
-        response = Response({"user": {"username": user.username}})
+        response = Response({"user": crm_user_payload(user)})
         response.set_cookie("access_token", str(refresh.access_token), httponly=True, secure=not django_settings.DEBUG, samesite="Lax")
         response.set_cookie("refresh_token", str(refresh), httponly=True, secure=not django_settings.DEBUG, samesite="Lax")
         AuditEvent.objects.create(actor=user, action="auth.login", entity_type="User", entity_id=str(user.id))
         return response
+
+
+class CurrentUserView(APIView):
+    permission_classes = [IsCRMUser]
+
+    def get(self, request):
+        return Response(crm_user_payload(request.user))
 
 class LogoutView(APIView):
     def post(self, request):
@@ -602,6 +613,540 @@ class AdminDevelopmentViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = DevelopmentSerializer; queryset = Development.objects.all()
 class AdminLeadViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = AdminLeadSerializer; queryset = Lead.objects.all().select_related("property", "development", "broker")
+
+
+def crm_contacts_for(user):
+    queryset = CRMContact.objects.all()
+    if can_view_all_crm(user):
+        return queryset
+    broker = user_broker(user)
+    return queryset.filter(
+        Q(assigned_broker=broker) | Q(opportunities__broker=broker) | Q(tasks__broker=broker)
+    ).distinct()
+
+
+def crm_opportunities_for(user):
+    queryset = CRMOpportunity.objects.all()
+    return queryset if can_view_all_crm(user) else queryset.filter(broker=user_broker(user))
+
+
+def crm_tasks_for(user):
+    queryset = CRMTask.objects.all()
+    return queryset if can_view_all_crm(user) else queryset.filter(broker=user_broker(user))
+
+
+def notify_broker(broker, *, kind, title, message="", link="/admin", priority=CRMNotification.Priority.NORMAL, unique_key=None, source_task=None):
+    if not broker or not broker.active or not broker.user_id or not broker.user.is_active:
+        return None
+    notification, _ = CRMNotification.objects.get_or_create(
+        unique_key=unique_key,
+        defaults={
+            "recipient": broker.user,
+            "broker": broker,
+            "source_task": source_task,
+            "kind": kind,
+            "priority": priority,
+            "title": title,
+            "message": message,
+            "link": link,
+        },
+    ) if unique_key else (CRMNotification.objects.create(
+        recipient=broker.user, broker=broker, source_task=source_task, kind=kind,
+        priority=priority, title=title, message=message, link=link,
+    ), True)
+    return notification
+
+
+def ensure_due_notifications(user):
+    broker = user_broker(user)
+    if not broker:
+        return
+    now = timezone.now()
+    limit = now + timedelta(hours=24)
+    tasks = CRMTask.objects.filter(broker=broker, status=CRMTask.Status.PENDING, due_at__lte=limit).select_related("contact")
+    for task in tasks:
+        overdue = task.due_at < now
+        if overdue:
+            CRMNotification.objects.filter(
+                source_task=task,
+                kind=CRMNotification.Kind.TASK_DUE,
+                read_at__isnull=True,
+            ).update(read_at=now)
+        notify_broker(
+            broker,
+            kind=CRMNotification.Kind.TASK_OVERDUE if overdue else CRMNotification.Kind.TASK_DUE,
+            title="Tarefa atrasada" if overdue else "Tarefa nas próximas 24 horas",
+            message=f"{task.title} · {task.contact.name}",
+            priority=CRMNotification.Priority.HIGH if overdue else CRMNotification.Priority.NORMAL,
+            unique_key=f"task:{task.id}:{'overdue' if overdue else 'due'}",
+            source_task=task,
+        )
+
+
+class CRMAuditMixin:
+    audit_entity = "CRM"
+    broker_assignment_field = None
+
+    def _restricted_broker(self):
+        return None if can_view_all_crm(self.request.user) else user_broker(self.request.user)
+
+    def perform_create(self, serializer):
+        defaults = {}
+        broker = self._restricted_broker()
+        if broker and self.broker_assignment_field:
+            defaults[self.broker_assignment_field] = broker
+        instance = serializer.save(**defaults)
+        AuditEvent.objects.create(
+            actor=self.request.user,
+            action=f"crm.{self.audit_entity.casefold()}.created",
+            entity_type=self.audit_entity,
+            entity_id=str(instance.id),
+        )
+
+    def perform_update(self, serializer):
+        broker = self._restricted_broker()
+        if broker and self.broker_assignment_field in serializer.validated_data:
+            assigned = serializer.validated_data[self.broker_assignment_field]
+            if assigned != broker:
+                raise ValidationError({self.broker_assignment_field: "O corretor não pode transferir registros para outro usuário."})
+        instance = serializer.save()
+        AuditEvent.objects.create(
+            actor=self.request.user,
+            action=f"crm.{self.audit_entity.casefold()}.updated",
+            entity_type=self.audit_entity,
+            entity_id=str(instance.id),
+        )
+
+
+class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
+    permission_classes = [IsCRMUser]
+    serializer_class = CRMContactSerializer
+    audit_entity = "CRMContact"
+    broker_assignment_field = "assigned_broker"
+    filterset_fields = ("status", "profile", "person_type", "assigned_broker", "source")
+    search_fields = ("name", "document", "phone", "email", "city", "tags")
+    ordering_fields = ("name", "created_at", "updated_at", "last_contact_at")
+
+    def get_queryset(self):
+        return crm_contacts_for(self.request.user).select_related("assigned_broker").prefetch_related(
+            "property_links__property"
+        ).annotate(
+            opportunity_count=Count("opportunities", distinct=True),
+            pending_task_count=Count("tasks", filter=Q(tasks__status=CRMTask.Status.PENDING), distinct=True),
+        ).order_by("name", "created_at")
+
+
+class AdminCRMPropertyLinkViewSet(CRMAuditMixin, viewsets.ModelViewSet):
+    permission_classes = [IsCRMUser]
+    serializer_class = CRMPropertyLinkSerializer
+    audit_entity = "CRMPropertyLink"
+    filterset_fields = ("contact", "property", "relationship", "active")
+    search_fields = ("contact__name", "property__title", "development_name", "unit_reference")
+
+    def get_queryset(self):
+        return CRMPropertyLink.objects.filter(contact__in=crm_contacts_for(self.request.user)).select_related("contact", "property")
+
+    def perform_create(self, serializer):
+        if not crm_contacts_for(self.request.user).filter(pk=serializer.validated_data["contact"].pk).exists():
+            raise ValidationError({"contact": "Contato fora da sua carteira."})
+        super().perform_create(serializer)
+
+    def perform_update(self, serializer):
+        contact = serializer.validated_data.get("contact", serializer.instance.contact)
+        if not crm_contacts_for(self.request.user).filter(pk=contact.pk).exists():
+            raise ValidationError({"contact": "Contato fora da sua carteira."})
+        super().perform_update(serializer)
+
+
+class AdminCRMOpportunityViewSet(CRMAuditMixin, viewsets.ModelViewSet):
+    permission_classes = [IsCRMUser]
+    serializer_class = CRMOpportunitySerializer
+    audit_entity = "CRMOpportunity"
+    broker_assignment_field = "broker"
+    filterset_fields = ("stage", "broker", "contact", "property", "source")
+    search_fields = ("title", "contact__name", "property__title", "notes")
+    ordering_fields = ("created_at", "updated_at", "next_action_at", "expected_value")
+
+    def get_queryset(self):
+        return crm_opportunities_for(self.request.user).select_related("contact", "property", "broker").annotate(
+            proposal_count=Count("proposals", distinct=True)
+        ).order_by("-updated_at")
+
+    def perform_create(self, serializer):
+        contact = serializer.validated_data["contact"]
+        if not crm_contacts_for(self.request.user).filter(pk=contact.pk).exists():
+            raise ValidationError({"contact": "Contato fora da sua carteira."})
+        super().perform_create(serializer)
+        opportunity = serializer.instance
+        notify_broker(
+            opportunity.broker,
+            kind=CRMNotification.Kind.ASSIGNMENT,
+            title="Nova oportunidade atribuída",
+            message=f"{opportunity.contact.name} · {opportunity.title}",
+            unique_key=f"opportunity:{opportunity.id}:assigned:{opportunity.broker_id}",
+        )
+
+    def perform_update(self, serializer):
+        old_broker_id = serializer.instance.broker_id
+        contact = serializer.validated_data.get("contact", serializer.instance.contact)
+        if not crm_contacts_for(self.request.user).filter(pk=contact.pk).exists():
+            raise ValidationError({"contact": "Contato fora da sua carteira."})
+        super().perform_update(serializer)
+        opportunity = serializer.instance
+        if opportunity.broker_id and opportunity.broker_id != old_broker_id:
+            notify_broker(
+                opportunity.broker,
+                kind=CRMNotification.Kind.ASSIGNMENT,
+                title="Oportunidade transferida para você",
+                message=f"{opportunity.contact.name} · {opportunity.title}",
+                unique_key=f"opportunity:{opportunity.id}:assigned:{opportunity.broker_id}",
+            )
+
+
+class AdminCRMTaskViewSet(CRMAuditMixin, viewsets.ModelViewSet):
+    permission_classes = [IsCRMUser]
+    serializer_class = CRMTaskSerializer
+    audit_entity = "CRMTask"
+    broker_assignment_field = "broker"
+    filterset_fields = ("status", "kind", "broker", "contact", "opportunity")
+    search_fields = ("title", "description", "contact__name")
+    ordering_fields = ("due_at", "created_at")
+
+    def get_queryset(self):
+        return crm_tasks_for(self.request.user).select_related("contact", "opportunity", "property", "broker")
+
+    def perform_create(self, serializer):
+        contact = serializer.validated_data["contact"]
+        opportunity = serializer.validated_data.get("opportunity")
+        if not crm_contacts_for(self.request.user).filter(pk=contact.pk).exists():
+            raise ValidationError({"contact": "Contato fora da sua carteira."})
+        if opportunity and not crm_opportunities_for(self.request.user).filter(pk=opportunity.pk).exists():
+            raise ValidationError({"opportunity": "Oportunidade fora da sua carteira."})
+        super().perform_create(serializer)
+        task = serializer.instance
+        notify_broker(
+            task.broker,
+            kind=CRMNotification.Kind.ASSIGNMENT,
+            title="Nova tarefa atribuída",
+            message=f"{task.title} · {task.contact.name}",
+            unique_key=f"task:{task.id}:assigned",
+            source_task=task,
+        )
+
+    def perform_update(self, serializer):
+        contact = serializer.validated_data.get("contact", serializer.instance.contact)
+        opportunity = serializer.validated_data.get("opportunity", serializer.instance.opportunity)
+        if not crm_contacts_for(self.request.user).filter(pk=contact.pk).exists():
+            raise ValidationError({"contact": "Contato fora da sua carteira."})
+        if opportunity and not crm_opportunities_for(self.request.user).filter(pk=opportunity.pk).exists():
+            raise ValidationError({"opportunity": "Oportunidade fora da sua carteira."})
+        due_changed = "due_at" in serializer.validated_data
+        super().perform_update(serializer)
+        task = serializer.instance
+        task_notifications = CRMNotification.objects.filter(
+            source_task=task,
+            kind__in=[CRMNotification.Kind.TASK_DUE, CRMNotification.Kind.TASK_OVERDUE],
+        )
+        if task.status != CRMTask.Status.PENDING:
+            task_notifications.filter(read_at__isnull=True).update(read_at=timezone.now())
+        elif due_changed:
+            task_notifications.delete()
+
+
+class AdminCRMActivityViewSet(CRMAuditMixin, viewsets.ModelViewSet):
+    permission_classes = [IsCRMUser]
+    serializer_class = CRMActivitySerializer
+    audit_entity = "CRMActivity"
+    filterset_fields = ("contact", "opportunity", "kind")
+    search_fields = ("description", "contact__name")
+
+    def get_queryset(self):
+        return CRMActivity.objects.filter(contact__in=crm_contacts_for(self.request.user)).select_related("contact", "opportunity", "actor")
+
+    def perform_create(self, serializer):
+        if not crm_contacts_for(self.request.user).filter(pk=serializer.validated_data["contact"].pk).exists():
+            raise ValidationError({"contact": "Contato fora da sua carteira."})
+        instance = serializer.save(actor=self.request.user)
+        AuditEvent.objects.create(
+            actor=self.request.user,
+            action="crm.activity.created",
+            entity_type="CRMActivity",
+            entity_id=str(instance.id),
+        )
+
+    def perform_update(self, serializer):
+        contact = serializer.validated_data.get("contact", serializer.instance.contact)
+        if not crm_contacts_for(self.request.user).filter(pk=contact.pk).exists():
+            raise ValidationError({"contact": "Contato fora da sua carteira."})
+        super().perform_update(serializer)
+
+
+class AdminCRMProposalViewSet(CRMAuditMixin, viewsets.ModelViewSet):
+    permission_classes = [IsCRMUser]
+    serializer_class = CRMProposalSerializer
+    audit_entity = "CRMProposal"
+    filterset_fields = ("status", "opportunity")
+    ordering_fields = ("created_at", "total_value", "valid_until")
+
+    def get_queryset(self):
+        return CRMProposal.objects.filter(opportunity__in=crm_opportunities_for(self.request.user)).select_related("opportunity__contact", "opportunity__property")
+
+    def perform_create(self, serializer):
+        opportunity = serializer.validated_data["opportunity"]
+        if not crm_opportunities_for(self.request.user).filter(pk=opportunity.pk).exists():
+            raise ValidationError({"opportunity": "Oportunidade fora da sua carteira."})
+        super().perform_create(serializer)
+
+    def perform_update(self, serializer):
+        opportunity = serializer.validated_data.get("opportunity", serializer.instance.opportunity)
+        if not crm_opportunities_for(self.request.user).filter(pk=opportunity.pk).exists():
+            raise ValidationError({"opportunity": "Oportunidade fora da sua carteira."})
+        super().perform_update(serializer)
+
+
+class AdminCRMImportRowViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsCRMManager]
+    serializer_class = CRMImportRowSerializer
+    queryset = CRMImportRow.objects.select_related("batch", "matched_contact", "matched_property")
+    http_method_names = ("get", "patch", "head", "options")
+    filterset_fields = ("batch", "status", "matched_contact", "matched_property")
+
+    def partial_update(self, request, *args, **kwargs):
+        row = self.get_object()
+        if row.batch.status != CRMImportBatch.Status.REVIEW:
+            raise ValidationError({"detail": "Esta importação não está mais em revisão."})
+        allowed = {"normalized_data", "matched_property", "status"}
+        unexpected = set(request.data) - allowed
+        if unexpected:
+            raise ValidationError({"detail": "Somente os dados normalizados, o imóvel e a situação podem ser revisados."})
+        data = request.data.get("normalized_data", row.normalized_data)
+        normalized, errors = sanitize_import_row(data)
+        row.matched_contact = find_duplicate_contact(normalized)
+        duplicate_row = find_duplicate_import_row(row.batch, normalized, exclude_id=row.id)
+        if duplicate_row:
+            normalized["duplicate_of_row"] = duplicate_row.row_number
+        requested_status = request.data.get("status")
+        if requested_status == CRMImportRow.Status.IGNORED:
+            row.status = CRMImportRow.Status.IGNORED
+        elif errors:
+            row.status = CRMImportRow.Status.ERROR
+        else:
+            row.status = CRMImportRow.Status.DUPLICATE if row.matched_contact or duplicate_row else CRMImportRow.Status.VALID
+        row.normalized_data = normalized
+        row.errors = errors
+        if "matched_property" in request.data:
+            property_id = request.data.get("matched_property")
+            row.matched_property = get_object_or_404(Property, pk=property_id) if property_id else None
+        row.save(update_fields=["normalized_data", "errors", "status", "matched_contact", "matched_property", "updated_at"])
+        counts = row.batch.rows.values("status").annotate(total=Count("id"))
+        totals = {item["status"]: item["total"] for item in counts}
+        row.batch.valid_rows = totals.get(CRMImportRow.Status.VALID, 0)
+        row.batch.duplicate_rows = totals.get(CRMImportRow.Status.DUPLICATE, 0)
+        row.batch.error_rows = totals.get(CRMImportRow.Status.ERROR, 0)
+        row.batch.save(update_fields=["valid_rows", "duplicate_rows", "error_rows", "updated_at"])
+        return Response(self.get_serializer(row).data)
+
+
+class AdminCRMImportBatchViewSet(mixins.CreateModelMixin, viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsCRMManager]
+    serializer_class = CRMImportBatchSerializer
+    queryset = CRMImportBatch.objects.select_related("created_by")
+
+    def create(self, request, *args, **kwargs):
+        upload = request.FILES.get("file")
+        if not upload:
+            raise ValidationError({"file": "Selecione um arquivo CSV ou PDF."})
+        try:
+            validate_crm_import(upload)
+        except ValueError as exc:
+            raise ValidationError({"file": str(exc)}) from exc
+        source_hash = file_sha256(upload)
+        batch = CRMImportBatch.objects.create(
+            file=upload,
+            original_name=upload.name,
+            source_hash=source_hash,
+            source_label=request.data.get("source_label", ""),
+            created_by=request.user,
+        )
+        process_import_batch(batch)
+        AuditEvent.objects.create(
+            actor=request.user,
+            action="crm.import.previewed",
+            entity_type="CRMImportBatch",
+            entity_id=str(batch.id),
+            metadata={"rows": batch.total_rows, "status": batch.status},
+        )
+        return Response(self.get_serializer(batch).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="ignore-invalid")
+    def ignore_invalid(self, request, pk=None):
+        batch = self.get_object()
+        if batch.status != CRMImportBatch.Status.REVIEW:
+            raise ValidationError({"detail": "Esta importação não está mais em revisão."})
+        ignored = batch.rows.filter(status=CRMImportRow.Status.ERROR).update(status=CRMImportRow.Status.IGNORED)
+        batch.error_rows = 0
+        batch.save(update_fields=["error_rows", "updated_at"])
+        AuditEvent.objects.create(
+            actor=request.user,
+            action="crm.import.invalid_rows_ignored",
+            entity_type="CRMImportBatch",
+            entity_id=str(batch.id),
+            metadata={"ignored_rows": ignored},
+        )
+        return Response({"ignored_rows": ignored, "batch": self.get_serializer(batch).data})
+
+    @action(detail=True, methods=["post"])
+    def commit(self, request, pk=None):
+        batch = self.get_object()
+        try:
+            imported = commit_import_batch(batch, request.user)
+        except ValueError as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+        AuditEvent.objects.create(
+            actor=request.user,
+            action="crm.import.committed",
+            entity_type="CRMImportBatch",
+            entity_id=str(batch.id),
+            metadata={"imported_rows": imported},
+        )
+        return Response({"imported_rows": imported, "batch": self.get_serializer(batch).data})
+
+
+class CRMNotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsCRMUser]
+    serializer_class = CRMNotificationSerializer
+
+    def get_queryset(self):
+        ensure_due_notifications(self.request.user)
+        return CRMNotification.objects.filter(recipient=self.request.user).select_related("broker", "source_task")
+
+    @action(detail=True, methods=["post"], url_path="mark-read")
+    def mark_read(self, request, pk=None):
+        notification = self.get_object()
+        if not notification.read_at:
+            notification.read_at = timezone.now()
+            notification.save(update_fields=["read_at", "updated_at"])
+        return Response(self.get_serializer(notification).data)
+
+    @action(detail=False, methods=["post"], url_path="mark-all-read")
+    def mark_all_read(self, request):
+        updated = CRMNotification.objects.filter(recipient=request.user, read_at__isnull=True).update(read_at=timezone.now())
+        return Response({"updated": updated})
+
+
+class CRMPropertyReferenceView(APIView):
+    permission_classes = [IsCRMUser]
+
+    def get(self, request):
+        properties = Property.objects.filter(archived_at__isnull=True).order_by("title").values(
+            "id", "public_id", "title", "status", "city", "neighborhood", "price"
+        )
+        return Response(list(properties))
+
+
+class CRMTeamReferenceView(APIView):
+    permission_classes = [IsCRMUser]
+
+    def get(self, request):
+        brokers = Broker.objects.filter(active=True).order_by("name")
+        if not can_view_all_crm(request.user):
+            brokers = brokers.filter(pk=user_broker(request.user).pk)
+        return Response(list(brokers.values("id", "name", "role")))
+
+
+class CRMReportView(APIView):
+    permission_classes = [IsCRMUser]
+
+    def get(self, request):
+        today = timezone.localdate()
+        start_date = parse_date(request.query_params.get("date_from", "")) or today - timedelta(days=29)
+        end_date = parse_date(request.query_params.get("date_to", "")) or today
+        if start_date > end_date:
+            raise ValidationError({"date_to": "A data final deve ser posterior à data inicial."})
+        if (end_date - start_date).days > 366:
+            raise ValidationError({"date_to": "O relatório permite no máximo 367 dias por consulta."})
+        start = timezone.make_aware(datetime.combine(start_date, time.min))
+        end = timezone.make_aware(datetime.combine(end_date + timedelta(days=1), time.min))
+
+        opportunities = crm_opportunities_for(request.user).select_related("broker")
+        period_opportunities = opportunities.filter(created_at__gte=start, created_at__lt=end)
+        closed = opportunities.filter(closed_at__gte=start, closed_at__lt=end)
+        won = closed.filter(stage=CRMOpportunity.Stage.WON)
+        lost = closed.filter(stage=CRMOpportunity.Stage.LOST)
+        decided = won.count() + lost.count()
+        open_stages = [
+            CRMOpportunity.Stage.NEW, CRMOpportunity.Stage.CONTACTED, CRMOpportunity.Stage.VISIT,
+            CRMOpportunity.Stage.PROPOSAL, CRMOpportunity.Stage.NEGOTIATION, CRMOpportunity.Stage.PAUSED,
+        ]
+        pipeline = opportunities.filter(stage__in=open_stages)
+        contacts = crm_contacts_for(request.user).filter(created_at__gte=start, created_at__lt=end)
+        tasks = crm_tasks_for(request.user)
+        proposals = CRMProposal.objects.filter(opportunity__in=opportunities)
+
+        cycle_days = [
+            (closed_at - created_at).total_seconds() / 86400
+            for created_at, closed_at in won.values_list("created_at", "closed_at") if closed_at
+        ]
+        trend_rows = period_opportunities.annotate(day=TruncDate("created_at")).values("day").annotate(total=Count("id")).order_by("day")
+        won_trend_rows = won.annotate(day=TruncDate("closed_at")).values("day").annotate(total=Count("id")).order_by("day")
+        trend = {}
+        cursor = start_date
+        while cursor <= end_date:
+            trend[cursor.isoformat()] = {"date": cursor.isoformat(), "opportunities": 0, "won": 0}
+            cursor += timedelta(days=1)
+        for row in trend_rows:
+            trend[row["day"].isoformat()]["opportunities"] = row["total"]
+        for row in won_trend_rows:
+            trend[row["day"].isoformat()]["won"] = row["total"]
+
+        source_rows = period_opportunities.values("source").annotate(total=Count("id")).order_by("-total", "source")
+        stage_rows = opportunities.values("stage").annotate(total=Count("id"), value=Sum("expected_value")).order_by("stage")
+        loss_rows = lost.exclude(loss_reason="").values("loss_reason").annotate(total=Count("id")).order_by("-total")[:10]
+
+        brokers = Broker.objects.filter(active=True)
+        if not can_view_all_crm(request.user):
+            brokers = brokers.filter(pk=user_broker(request.user).pk)
+        broker_performance = []
+        for broker in brokers.order_by("name"):
+            broker_created = period_opportunities.filter(broker=broker)
+            broker_closed = closed.filter(broker=broker)
+            broker_won = broker_closed.filter(stage=CRMOpportunity.Stage.WON).count()
+            broker_lost = broker_closed.filter(stage=CRMOpportunity.Stage.LOST).count()
+            broker_decided = broker_won + broker_lost
+            broker_performance.append({
+                "broker_id": str(broker.id),
+                "broker_name": broker.name,
+                "opportunities": broker_created.count(),
+                "won": broker_won,
+                "lost": broker_lost,
+                "conversion_rate": round(broker_won * 100 / broker_decided, 1) if broker_decided else 0,
+                "won_value": float(broker_closed.filter(stage=CRMOpportunity.Stage.WON).aggregate(value=Sum("expected_value"))["value"] or 0),
+                "overdue_tasks": tasks.filter(broker=broker, status=CRMTask.Status.PENDING, due_at__lt=timezone.now()).count(),
+            })
+
+        return Response({
+            "period": {"date_from": start_date, "date_to": end_date},
+            "metrics": {
+                "new_contacts": contacts.count(),
+                "new_opportunities": period_opportunities.count(),
+                "won": won.count(),
+                "lost": lost.count(),
+                "conversion_rate": round(won.count() * 100 / decided, 1) if decided else 0,
+                "pipeline_value": float(pipeline.aggregate(value=Sum("expected_value"))["value"] or 0),
+                "won_value": float(won.aggregate(value=Sum("expected_value"))["value"] or 0),
+                "average_cycle_days": round(sum(cycle_days) / len(cycle_days), 1) if cycle_days else 0,
+                "overdue_tasks": tasks.filter(status=CRMTask.Status.PENDING, due_at__lt=timezone.now()).count(),
+                "completed_visits": tasks.filter(kind=CRMTask.Kind.VISIT, status=CRMTask.Status.COMPLETED, completed_at__gte=start, completed_at__lt=end).count(),
+                "sent_proposals": proposals.filter(status__in=[CRMProposal.Status.SENT, CRMProposal.Status.ANALYSIS, CRMProposal.Status.COUNTER, CRMProposal.Status.ACCEPTED], updated_at__gte=start, updated_at__lt=end).count(),
+            },
+            "by_stage": [{"stage": row["stage"], "label": dict(CRMOpportunity.Stage.choices)[row["stage"]], "total": row["total"], "value": float(row["value"] or 0)} for row in stage_rows],
+            "by_source": list(source_rows),
+            "loss_reasons": list(loss_rows),
+            "broker_performance": broker_performance,
+            "trend": list(trend.values()),
+        })
+
+
 class AdminBrokerViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = BrokerSerializer; queryset = Broker.objects.all()
 class AdminSettingsViewSet(viewsets.ModelViewSet):

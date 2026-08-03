@@ -6,11 +6,15 @@ import {
   ArrowUp,
   Archive,
   ArchiveRestore,
+  BarChart3,
   BadgeDollarSign,
+  Bell,
   Building2,
   CalendarDays,
   CheckCircle2,
   CircleAlert,
+  ClipboardList,
+  FileUp,
   GripVertical,
   Handshake,
   ImagePlus,
@@ -22,10 +26,12 @@ import {
   Plus,
   Save,
   Settings,
+  ShieldCheck,
   Rocket,
   Star,
   Trash2,
   Upload,
+  UserPlus,
   UserCheck,
   Users,
   X,
@@ -33,7 +39,7 @@ import {
 import { Link } from "react-router-dom";
 import { api } from "./api";
 import { collectPages, paginateItems } from "./pagination";
-import type { FAQ, HeroSlide, InstitutionalImage, Lead, ListingOption, Page, Property, PublicContent, SiteSettings, Testimonial } from "./types";
+import type { AdminSession, CRMActivity, CRMBroker, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMReport, CRMTask, FAQ, HeroSlide, InstitutionalImage, Lead, ListingOption, Page, Property, PublicContent, SiteSettings, Testimonial } from "./types";
 
 const reviewLabels: Record<string, string> = {
   green: "Novo",
@@ -260,7 +266,7 @@ export default function AdminPanel() {
   const queryClient = useQueryClient();
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [selected, setSelected] = useState<Property | null>(null);
-  const [section, setSection] = useState<"properties" | "clients" | "content">("properties");
+  const [section, setSection] = useState<"properties" | "crm" | "clients" | "content">("properties");
   const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   const [form, setForm] = useState<Record<string, string | boolean>>(blank);
   const [notice, setNotice] = useState("");
@@ -287,34 +293,36 @@ export default function AdminPanel() {
     document.body.classList.toggle("admin-menu-open", adminMenuOpen);
     return () => document.body.classList.remove("admin-menu-open");
   }, [adminMenuOpen]);
+  const sessionQuery = useQuery({
+    queryKey: ["admin-session"],
+    retry: false,
+    queryFn: async () => (await api.get<AdminSession>("/admin/auth/me/")).data,
+  });
+  useEffect(() => {
+    if (sessionQuery.data) {
+      setAuthenticated(true);
+      if (!sessionQuery.data.can_manage_site) setSection("crm");
+    } else if (sessionQuery.isError) {
+      setAuthenticated(false);
+    }
+  }, [sessionQuery.data, sessionQuery.isError]);
   const properties = useQuery({
     queryKey: ["admin-properties"],
-    enabled: authenticated !== false,
+    enabled: authenticated === true && sessionQuery.data?.can_manage_site === true,
     retry: false,
-    queryFn: async () => {
-      try {
-        const allProperties = await collectPages("/admin/properties/", async (url) => {
-          const response = await api.get<Page<Property>>(url);
-          return response.data;
-        });
-        setAuthenticated(true);
-        return allProperties;
-      } catch (e) {
-        if ((e as { response?: { status?: number } }).response?.status === 401) {
-          setAuthenticated(false);
-        }
-        throw e;
-      }
-    },
+    queryFn: async () => collectPages("/admin/properties/", async (url) => {
+      const response = await api.get<Page<Property>>(url);
+      return response.data;
+    }),
   });
   const listingOptions = useQuery({
     queryKey: ["admin-listing-options"],
-    enabled: authenticated === true,
+    enabled: authenticated === true && sessionQuery.data?.can_manage_site === true,
     queryFn: async () => (await api.get<ListingOption[]>("/admin/listing-options/")).data,
   });
   const leads = useQuery({
     queryKey: ["admin-leads"],
-    enabled: authenticated === true,
+    enabled: authenticated === true && sessionQuery.data?.can_manage_site === true,
     refetchInterval: 5000,
     queryFn: async () => (await api.get<Page<Lead>>("/admin/leads/")).data.results,
   });
@@ -342,9 +350,11 @@ export default function AdminPanel() {
   }, [selected]);
   const login = useMutation({
     mutationFn: (d: { username: string; password: string }) =>
-      api.post("/admin/auth/login/", d),
-    onSuccess: () => {
+      api.post<{ user: AdminSession }>("/admin/auth/login/", d),
+    onSuccess: ({ data }) => {
       setAuthenticated(true);
+      queryClient.setQueryData(["admin-session"], data.user);
+      if (!data.user.can_manage_site) setSection("crm");
       queryClient.invalidateQueries({ queryKey: ["admin-properties"] });
     },
   });
@@ -680,15 +690,18 @@ export default function AdminPanel() {
         </button>
         <img src="/assets/brand/logo-transparent.png" alt="In Mare" />
         <nav id="admin-panel-nav">
-          <button onClick={() => { setSection("properties"); setSelected(null); setAdminMenuOpen(false); }}>
+          {sessionQuery.data?.can_manage_site && <button onClick={() => { setSection("properties"); setSelected(null); setAdminMenuOpen(false); }}>
             <Building2 /> Imóveis
+          </button>}
+          {sessionQuery.data?.can_manage_site && <button onClick={() => { setSection("clients"); setSelected(null); setAdminMenuOpen(false); }}>
+            <Users /> Contatos do site
+          </button>}
+          <button onClick={() => { setSection("crm"); setSelected(null); setAdminMenuOpen(false); }}>
+            <ClipboardList /> CRM comercial
           </button>
-          <button onClick={() => { setSection("clients"); setSelected(null); setAdminMenuOpen(false); }}>
-            <Users /> Clientes
-          </button>
-          <button onClick={() => { setSection("content"); setSelected(null); setAdminMenuOpen(false); }}>
+          {sessionQuery.data?.can_manage_site && <button onClick={() => { setSection("content"); setSelected(null); setAdminMenuOpen(false); }}>
             <Settings /> Conteúdo e redes
-          </button>
+          </button>}
           <Link to="/" onClick={() => setAdminMenuOpen(false)}>
             <ArrowLeft /> Ver site
           </Link>
@@ -707,7 +720,7 @@ export default function AdminPanel() {
         <div className="admin-head">
           <div>
             <small>PAINEL ADMINISTRATIVO</small>
-            <h1>{selected ? "Editar imóvel" : section === "clients" ? "Gestão de clientes" : section === "content" ? "Conteúdo e redes" : "Gestão de imóveis"}</h1>
+            <h1>{selected ? "Editar imóvel" : section === "crm" ? "CRM comercial" : section === "clients" ? "Contatos recebidos" : section === "content" ? "Conteúdo e redes" : "Gestão de imóveis"}</h1>
           </div>
           {section === "properties" && <button
             className="gold-button"
@@ -726,6 +739,12 @@ export default function AdminPanel() {
         </div>
         {section === "content" ? (
           <ContentPanel notify={(message, failed = false) => failed ? setError(message) : setNotice(message)} />
+        ) : section === "crm" ? (
+          <CRMPanel
+            properties={list}
+            session={sessionQuery.data!}
+            notify={(message, failed = false) => failed ? setError(message) : setNotice(message)}
+          />
         ) : section === "clients" ? (
           <ClientsPanel
             leads={leads.data ?? []}
@@ -947,6 +966,403 @@ function Toast({
       <i />
     </div>
   );
+}
+
+const crmStageLabels: Record<CRMOpportunity["stage"], string> = {
+  new: "Lead recebido",
+  contacted: "Contato realizado",
+  visit: "Visita agendada",
+  proposal: "Proposta enviada",
+  negotiation: "Negociação",
+  won: "Fechado",
+  lost: "Perdido",
+  paused: "Pausado",
+};
+
+const crmStages = Object.keys(crmStageLabels) as CRMOpportunity["stage"][];
+
+function maskDocument(value?: string | null) {
+  if (!value) return "Não informado";
+  return value.length === 14
+    ? `••.•••.•••/${value.slice(-4, -2)}-${value.slice(-2)}`
+    : `•••.•••.•••-${value.slice(-2)}`;
+}
+
+function CRMPanel({ properties, session, notify }: { properties: Property[]; session: AdminSession; notify: (message: string, failed?: boolean) => void }) {
+  const queryClient = useQueryClient();
+  const [tab, setTab] = useState<"funnel" | "contacts" | "tasks" | "proposals" | "imports" | "reports" | "notifications" | "team">("funnel");
+  const [search, setSearch] = useState("");
+  const [editingContact, setEditingContact] = useState<CRMContact | null>(null);
+  const [showContactForm, setShowContactForm] = useState(false);
+  const [contactForm, setContactForm] = useState({ name: "", person_type: "individual", document: "", phone: "", email: "", profile: "general", city: "", state: "", source: "manual", notes: "", assigned_broker: "" });
+  const [opportunityForm, setOpportunityForm] = useState({ contact: "", property: "", title: "", expected_value: "", broker: "" });
+  const [taskForm, setTaskForm] = useState({ contact: "", opportunity: "", title: "", kind: "follow_up", due_at: "", broker: "" });
+  const [proposalForm, setProposalForm] = useState({ opportunity: "", total_value: "", down_payment: "", financing_value: "", installment_count: "", installment_value: "", reinforcement_count: "", reinforcement_value: "", exchange_description: "", exchange_value: "", valid_until: "", notes: "" });
+  const [linkForm, setLinkForm] = useState({ property: "", development_name: "", unit_reference: "", relationship: "owner" });
+  const [activityNote, setActivityNote] = useState("");
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importLabel, setImportLabel] = useState("Base Riviera 2024");
+  const [currentBatch, setCurrentBatch] = useState<string | null>(null);
+  const [editingImportRow, setEditingImportRow] = useState<CRMImportRow | null>(null);
+  const [importRowForm, setImportRowForm] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const reportDefaultTo = new Date().toISOString().slice(0, 10);
+  const reportDefaultFrom = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  const [reportDates, setReportDates] = useState({ date_from: reportDefaultFrom, date_to: reportDefaultTo });
+  const [brokerForm, setBrokerForm] = useState({ name: "", email: "", phone: "", whatsapp: "", role: "broker", username: "", password: "" });
+
+  const contactsQuery = useQuery({
+    queryKey: ["crm-contacts"],
+    queryFn: () => collectPages("/admin/crm/contacts/?ordering=name", async (url) => (await api.get<Page<CRMContact>>(url)).data),
+  });
+  const opportunitiesQuery = useQuery({
+    queryKey: ["crm-opportunities"],
+    queryFn: () => collectPages("/admin/crm/opportunities/", async (url) => (await api.get<Page<CRMOpportunity>>(url)).data),
+  });
+  const tasksQuery = useQuery({
+    queryKey: ["crm-tasks"],
+    queryFn: () => collectPages("/admin/crm/tasks/?ordering=due_at", async (url) => (await api.get<Page<CRMTask>>(url)).data),
+  });
+  const proposalsQuery = useQuery({
+    queryKey: ["crm-proposals"],
+    queryFn: () => collectPages("/admin/crm/proposals/", async (url) => (await api.get<Page<CRMProposal>>(url)).data),
+  });
+  const activitiesQuery = useQuery({
+    queryKey: ["crm-activities", editingContact?.id],
+    enabled: !!editingContact,
+    queryFn: () => collectPages(`/admin/crm/activities/?contact=${editingContact?.id}`, async (url) => (await api.get<Page<CRMActivity>>(url)).data),
+  });
+  const importsQuery = useQuery({
+    queryKey: ["crm-imports"],
+    enabled: session.can_view_all_crm,
+    queryFn: () => collectPages("/admin/crm/imports/", async (url) => (await api.get<Page<CRMImportBatch>>(url)).data),
+  });
+  const rowsQuery = useQuery({
+    queryKey: ["crm-import-rows", currentBatch],
+    enabled: session.can_view_all_crm && !!currentBatch,
+    queryFn: () => collectPages(`/admin/crm/import-rows/?batch=${currentBatch}`, async (url) => (await api.get<Page<CRMImportRow>>(url)).data),
+  });
+  const referencePropertiesQuery = useQuery({
+    queryKey: ["crm-reference-properties"],
+    queryFn: async () => (await api.get<Array<Partial<Property> & { id: string; title: string }>>("/admin/crm/reference-properties/")).data,
+  });
+  const teamReferenceQuery = useQuery({
+    queryKey: ["crm-reference-team"],
+    queryFn: async () => (await api.get<Array<{ id: string; name: string; role: string }>>("/admin/crm/reference-team/")).data,
+  });
+  const reportsQuery = useQuery({
+    queryKey: ["crm-reports", reportDates],
+    queryFn: async () => (await api.get<CRMReport>(`/admin/crm/reports/?date_from=${reportDates.date_from}&date_to=${reportDates.date_to}`)).data,
+  });
+  const notificationsQuery = useQuery({
+    queryKey: ["crm-notifications"],
+    refetchInterval: 30000,
+    queryFn: () => collectPages("/admin/crm/notifications/", async (url) => (await api.get<Page<CRMNotification>>(url)).data),
+  });
+  const brokersQuery = useQuery({
+    queryKey: ["crm-brokers"],
+    enabled: session.can_manage_team,
+    queryFn: () => collectPages("/admin/brokers/", async (url) => (await api.get<Page<CRMBroker>>(url)).data),
+  });
+  const contacts = contactsQuery.data ?? [];
+  const opportunities = opportunitiesQuery.data ?? [];
+  const tasks = tasksQuery.data ?? [];
+  const crmProperties = referencePropertiesQuery.data ?? properties;
+  const teamReference = teamReferenceQuery.data ?? [];
+  const notifications = notificationsQuery.data ?? [];
+  const unreadNotifications = notifications.filter((item) => !item.read_at).length;
+  const selectedBatch = (importsQuery.data ?? []).find((batch) => batch.id === currentBatch);
+  const filteredContacts = contacts.filter((contact) =>
+    [contact.name, contact.email, contact.phone, contact.city].some((value) => value?.toLocaleLowerCase("pt-BR").includes(search.toLocaleLowerCase("pt-BR"))),
+  );
+
+  const refreshCRM = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["crm-contacts"] }),
+      queryClient.invalidateQueries({ queryKey: ["crm-opportunities"] }),
+      queryClient.invalidateQueries({ queryKey: ["crm-tasks"] }),
+      queryClient.invalidateQueries({ queryKey: ["crm-proposals"] }),
+      queryClient.invalidateQueries({ queryKey: ["crm-imports"] }),
+    ]);
+  };
+  const resetContactForm = () => {
+    setEditingContact(null);
+    setShowContactForm(false);
+    setContactForm({ name: "", person_type: "individual", document: "", phone: "", email: "", profile: "general", city: "", state: "", source: "manual", notes: "", assigned_broker: "" });
+  };
+  const saveContact = async () => {
+    if (!contactForm.name.trim()) return notify("Informe o nome do contato.", true);
+    try {
+      const payload = { ...contactForm, assigned_broker: contactForm.assigned_broker || null };
+      if (editingContact) await api.patch(`/admin/crm/contacts/${editingContact.id}/`, payload);
+      else await api.post("/admin/crm/contacts/", payload);
+      notify(editingContact ? "Contato atualizado." : "Contato cadastrado no CRM.");
+      resetContactForm();
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const editContact = (contact: CRMContact) => {
+    setEditingContact(contact);
+    setShowContactForm(true);
+    setContactForm({
+      name: contact.name, person_type: contact.person_type, document: contact.document ?? "", phone: contact.phone,
+      email: contact.email, profile: contact.profile, city: contact.city, state: contact.state, source: contact.source, notes: contact.notes, assigned_broker: contact.assigned_broker ?? "",
+    });
+  };
+  const createPropertyLink = async () => {
+    if (!editingContact || (!linkForm.property && !linkForm.unit_reference.trim())) return notify("Escolha um imóvel ou informe a unidade.", true);
+    try {
+      await api.post("/admin/crm/property-links/", { ...linkForm, property: linkForm.property || null, contact: editingContact.id });
+      notify("Vínculo com o imóvel registrado.");
+      setLinkForm({ property: "", development_name: "", unit_reference: "", relationship: "owner" });
+      await refreshCRM();
+      const response = await api.get<CRMContact>(`/admin/crm/contacts/${editingContact.id}/`);
+      editContact(response.data);
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const addActivity = async () => {
+    if (!editingContact || !activityNote.trim()) return;
+    try {
+      await api.post("/admin/crm/activities/", { contact: editingContact.id, kind: "note", description: activityNote });
+      setActivityNote("");
+      notify("Observação adicionada ao histórico.");
+      await queryClient.invalidateQueries({ queryKey: ["crm-activities", editingContact.id] });
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const createOpportunity = async () => {
+    if (!opportunityForm.contact || !opportunityForm.title.trim()) return notify("Escolha o contato e informe o título da oportunidade.", true);
+    try {
+      await api.post("/admin/crm/opportunities/", { ...opportunityForm, property: opportunityForm.property || null, expected_value: opportunityForm.expected_value || null, broker: opportunityForm.broker || null, source: "manual", stage: "new" });
+      setOpportunityForm({ contact: "", property: "", title: "", expected_value: "", broker: "" });
+      notify("Oportunidade adicionada ao funil.");
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const moveOpportunity = async (opportunity: CRMOpportunity, stage: CRMOpportunity["stage"]) => {
+    const lossReason = stage === "lost" ? window.prompt("Informe o motivo da perda desta oportunidade:") : "";
+    if (stage === "lost" && !lossReason?.trim()) return;
+    try {
+      await api.patch(`/admin/crm/opportunities/${opportunity.id}/`, { stage, ...(lossReason ? { loss_reason: lossReason } : {}) });
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const createTask = async () => {
+    if (!taskForm.contact || !taskForm.title.trim() || !taskForm.due_at) return notify("Preencha contato, tarefa e data.", true);
+    try {
+      await api.post("/admin/crm/tasks/", { ...taskForm, opportunity: taskForm.opportunity || null, broker: taskForm.broker || null, due_at: new Date(taskForm.due_at).toISOString(), status: "pending" });
+      setTaskForm({ contact: "", opportunity: "", title: "", kind: "follow_up", due_at: "", broker: "" });
+      notify("Tarefa criada.");
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const completeTask = async (task: CRMTask) => {
+    try {
+      await api.patch(`/admin/crm/tasks/${task.id}/`, { status: task.status === "completed" ? "pending" : "completed" });
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const createProposal = async () => {
+    if (!proposalForm.opportunity || !proposalForm.total_value) return notify("Escolha a oportunidade e informe o valor total.", true);
+    const installments = proposalForm.installment_count || proposalForm.installment_value
+      ? [{ count: Number(proposalForm.installment_count || 0), value: normalizeDecimalInput(proposalForm.installment_value), note: "Parcelas" }] : [];
+    const annual_reinforcements = proposalForm.reinforcement_count || proposalForm.reinforcement_value
+      ? [{ count: Number(proposalForm.reinforcement_count || 0), value: normalizeDecimalInput(proposalForm.reinforcement_value), note: "Reforços anuais" }] : [];
+    const exchanges = proposalForm.exchange_description
+      ? [{ description: proposalForm.exchange_description, value: normalizeDecimalInput(proposalForm.exchange_value) }] : [];
+    try {
+      await api.post("/admin/crm/proposals/", {
+        opportunity: proposalForm.opportunity,
+        total_value: normalizeDecimalInput(proposalForm.total_value),
+        down_payment: normalizeDecimalInput(proposalForm.down_payment || "0"),
+        financing_value: normalizeDecimalInput(proposalForm.financing_value || "0"),
+        installments, annual_reinforcements, exchanges,
+        valid_until: proposalForm.valid_until || null, notes: proposalForm.notes, status: "draft",
+      });
+      setProposalForm({ opportunity: "", total_value: "", down_payment: "", financing_value: "", installment_count: "", installment_value: "", reinforcement_count: "", reinforcement_value: "", exchange_description: "", exchange_value: "", valid_until: "", notes: "" });
+      notify("Proposta versionada criada.");
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const updateProposalStatus = async (proposal: CRMProposal, status: CRMProposal["status"]) => {
+    try {
+      await api.patch(`/admin/crm/proposals/${proposal.id}/`, { status });
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const uploadImport = async () => {
+    if (!importFile) return notify("Selecione o PDF ou CSV.", true);
+    setBusy(true);
+    try {
+      const data = new FormData(); data.append("file", importFile); data.append("source_label", importLabel);
+      const response = await api.post<CRMImportBatch>("/admin/crm/imports/", data);
+      setCurrentBatch(response.data.id);
+      setImportFile(null);
+      notify(response.data.status === "failed" ? response.data.errors.join(" ") : `${response.data.total_rows} registros enviados para revisão.`, response.data.status === "failed");
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
+    finally { setBusy(false); }
+  };
+  const ignoreImportRow = async (row: CRMImportRow) => {
+    try {
+      await api.patch(`/admin/crm/import-rows/${row.id}/`, { status: "ignored" });
+      await Promise.all([queryClient.invalidateQueries({ queryKey: ["crm-import-rows", currentBatch] }), queryClient.invalidateQueries({ queryKey: ["crm-imports"] })]);
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const ignoreAllInvalidRows = async () => {
+    if (!currentBatch) return;
+    setBusy(true);
+    try {
+      const response = await api.post<{ ignored_rows: number }>(`/admin/crm/imports/${currentBatch}/ignore-invalid/`);
+      notify(`${response.data.ignored_rows} registros inválidos foram ignorados.`);
+      await Promise.all([queryClient.invalidateQueries({ queryKey: ["crm-import-rows", currentBatch] }), queryClient.invalidateQueries({ queryKey: ["crm-imports"] })]);
+    } catch (error) { notify(friendlyApiError(error), true); }
+    finally { setBusy(false); }
+  };
+  const editImportRow = (row: CRMImportRow) => {
+    setEditingImportRow(row);
+    setImportRowForm({ ...row.normalized_data });
+  };
+  const saveImportRow = async () => {
+    if (!editingImportRow) return;
+    try {
+      await api.patch(`/admin/crm/import-rows/${editingImportRow.id}/`, { normalized_data: importRowForm });
+      setEditingImportRow(null);
+      notify("Registro saneado e validado novamente.");
+      await Promise.all([queryClient.invalidateQueries({ queryKey: ["crm-import-rows", currentBatch] }), queryClient.invalidateQueries({ queryKey: ["crm-imports"] })]);
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const commitImport = async () => {
+    if (!currentBatch) return;
+    setBusy(true);
+    try {
+      const response = await api.post<{ imported_rows: number }>(`/admin/crm/imports/${currentBatch}/commit/`);
+      notify(`${response.data.imported_rows} contatos novos importados. Duplicados não foram cadastrados novamente.`);
+      await refreshCRM();
+      await queryClient.invalidateQueries({ queryKey: ["crm-import-rows", currentBatch] });
+    } catch (error) { notify(friendlyApiError(error), true); }
+    finally { setBusy(false); }
+  };
+  const markNotificationRead = async (notification: CRMNotification) => {
+    if (!notification.read_at) await api.post(`/admin/crm/notifications/${notification.id}/mark-read/`);
+    await queryClient.invalidateQueries({ queryKey: ["crm-notifications"] });
+  };
+  const markAllNotificationsRead = async () => {
+    await api.post("/admin/crm/notifications/mark-all-read/");
+    await queryClient.invalidateQueries({ queryKey: ["crm-notifications"] });
+  };
+  const createBrokerAccess = async () => {
+    if (!brokerForm.name.trim() || !brokerForm.username.trim() || !brokerForm.password) return notify("Informe nome, usuário e senha provisória.", true);
+    try {
+      await api.post("/admin/brokers/", { ...brokerForm, active: true });
+      setBrokerForm({ name: "", email: "", phone: "", whatsapp: "", role: "broker", username: "", password: "" });
+      notify("Corretor e acesso cadastrados.");
+      await queryClient.invalidateQueries({ queryKey: ["crm-brokers"] });
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const toggleBroker = async (broker: CRMBroker) => {
+    try {
+      await api.patch(`/admin/brokers/${broker.id}/`, { active: !broker.active });
+      await queryClient.invalidateQueries({ queryKey: ["crm-brokers"] });
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+
+  return <div className="crm-panel">
+    <div className="metrics crm-metrics">
+      <div><span>Contatos</span><strong>{contacts.length}</strong></div>
+      <div><span>Oportunidades abertas</span><strong>{opportunities.filter((item) => !["won", "lost"].includes(item.stage)).length}</strong></div>
+      <div><span>Follow-ups pendentes</span><strong>{tasks.filter((task) => task.status === "pending").length}</strong></div>
+      <div><span>Negócios fechados</span><strong>{opportunities.filter((item) => item.stage === "won").length}</strong></div>
+    </div>
+    <div className="crm-tabs" role="tablist">
+      <button className={tab === "funnel" ? "active" : ""} onClick={() => setTab("funnel")}><Handshake /> Funil</button>
+      <button className={tab === "contacts" ? "active" : ""} onClick={() => setTab("contacts")}><Users /> Contatos</button>
+      <button className={tab === "tasks" ? "active" : ""} onClick={() => setTab("tasks")}><CalendarDays /> Agenda</button>
+      <button className={tab === "proposals" ? "active" : ""} onClick={() => setTab("proposals")}><BadgeDollarSign /> Propostas</button>
+      {session.can_view_all_crm && <button className={tab === "imports" ? "active" : ""} onClick={() => setTab("imports")}><FileUp /> Importações</button>}
+      <button className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")}><BarChart3 /> Relatórios</button>
+      <button className={tab === "notifications" ? "active" : ""} onClick={() => setTab("notifications")}><Bell /> Avisos {unreadNotifications > 0 && <span className="crm-tab-badge">{unreadNotifications}</span>}</button>
+      {session.can_manage_team && <button className={tab === "team" ? "active" : ""} onClick={() => setTab("team")}><ShieldCheck /> Equipe e acessos</button>}
+    </div>
+
+    {tab === "funnel" && <>
+      <section className="admin-card crm-create-row">
+        <h2>Nova oportunidade</h2>
+        <div className="form-grid">
+          <label>Contato<select value={opportunityForm.contact} onChange={(event) => setOpportunityForm({ ...opportunityForm, contact: event.target.value })}><option value="">Selecione</option>{contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name}</option>)}</select></label>
+          <label>Imóvel<select value={opportunityForm.property} onChange={(event) => setOpportunityForm({ ...opportunityForm, property: event.target.value })}><option value="">Atendimento geral</option>{crmProperties.filter((property) => property.id).map((property) => <option key={property.id} value={property.id}>{property.title}</option>)}</select></label>
+          <label>Título<input value={opportunityForm.title} onChange={(event) => setOpportunityForm({ ...opportunityForm, title: event.target.value })} placeholder="Ex.: Compra no Riviera" /></label>
+          <label>Valor esperado<input inputMode="decimal" value={opportunityForm.expected_value} onChange={(event) => setOpportunityForm({ ...opportunityForm, expected_value: normalizeDecimalInput(event.target.value) })} /></label>
+          {session.can_view_all_crm && <label>Corretor responsável<select value={opportunityForm.broker} onChange={(event) => setOpportunityForm({ ...opportunityForm, broker: event.target.value })}><option value="">Ainda não atribuído</option>{teamReference.map((broker) => <option value={broker.id} key={broker.id}>{broker.name}</option>)}</select></label>}
+        </div><button className="gold-button" onClick={createOpportunity}><Plus /> Adicionar ao funil</button>
+      </section>
+      <div className="crm-funnel">
+        {crmStages.map((stage) => <section key={stage} className="crm-stage"><header><b>{crmStageLabels[stage]}</b><span>{opportunities.filter((item) => item.stage === stage).length}</span></header>{opportunities.filter((item) => item.stage === stage).map((item) => <article key={item.id}><b>{item.contact_name}</b><span>{item.title}</span>{item.property_title && <small>{item.property_title}</small>}<select aria-label="Mover oportunidade" value={item.stage} onChange={(event) => moveOpportunity(item, event.target.value as CRMOpportunity["stage"])}>{crmStages.map((value) => <option value={value} key={value}>{crmStageLabels[value]}</option>)}</select></article>)}</section>)}
+      </div>
+    </>}
+
+    {tab === "contacts" && <>
+      <section className="admin-card crm-contact-toolbar"><input placeholder="Buscar nome, telefone, e-mail ou cidade" value={search} onChange={(event) => setSearch(event.target.value)} /><button className="gold-button" onClick={() => { resetContactForm(); setShowContactForm(true); }}><UserPlus /> Novo contato</button></section>
+      {showContactForm && <section className="admin-card crm-contact-editor"><header><div><h2>{editingContact ? "Editar contato" : "Novo contato"}</h2><p>Dados comerciais e classificação do cliente.</p></div><button className="outline" onClick={resetContactForm}><X /> Fechar</button></header><div className="form-grid">
+        <label>Nome *<input value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} /></label>
+        <label>Tipo<select value={contactForm.person_type} onChange={(event) => setContactForm({ ...contactForm, person_type: event.target.value })}><option value="individual">Pessoa física</option><option value="company">Pessoa jurídica</option></select></label>
+        <label>CPF/CNPJ<input value={contactForm.document} onChange={(event) => setContactForm({ ...contactForm, document: event.target.value })} /></label>
+        <label>WhatsApp<input value={contactForm.phone} onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })} /></label>
+        <label>E-mail<input type="email" value={contactForm.email} onChange={(event) => setContactForm({ ...contactForm, email: event.target.value })} /></label>
+        <label>Perfil<select value={contactForm.profile} onChange={(event) => setContactForm({ ...contactForm, profile: event.target.value })}><option value="general">Contato</option><option value="owner">Proprietário</option><option value="buyer">Comprador</option><option value="seller">Vendedor</option><option value="investor">Investidor</option><option value="partner">Parceiro</option></select></label>
+        <label>Cidade<input value={contactForm.city} onChange={(event) => setContactForm({ ...contactForm, city: event.target.value })} /></label>
+        <label>UF<input maxLength={2} value={contactForm.state} onChange={(event) => setContactForm({ ...contactForm, state: event.target.value.toUpperCase() })} /></label>
+        <label>Origem<input value={contactForm.source} onChange={(event) => setContactForm({ ...contactForm, source: event.target.value })} /></label>
+        {session.can_view_all_crm && <label>Corretor responsável<select value={contactForm.assigned_broker} onChange={(event) => setContactForm({ ...contactForm, assigned_broker: event.target.value })}><option value="">Sem responsável</option>{teamReference.map((broker) => <option value={broker.id} key={broker.id}>{broker.name}</option>)}</select></label>}
+        <label className="crm-notes">Observações<textarea rows={4} value={contactForm.notes} onChange={(event) => setContactForm({ ...contactForm, notes: event.target.value })} /></label>
+      </div><button className="gold-button" onClick={saveContact}><Save /> Salvar contato</button>
+      {editingContact && <><div className="crm-link-editor"><h3>Vincular proprietário e imóvel</h3><div className="form-grid"><label>Imóvel cadastrado<select value={linkForm.property} onChange={(event) => setLinkForm({ ...linkForm, property: event.target.value })}><option value="">Unidade externa</option>{crmProperties.filter((property) => property.id).map((property) => <option key={property.id} value={property.id}>{property.title}</option>)}</select></label><label>Empreendimento<input value={linkForm.development_name} onChange={(event) => setLinkForm({ ...linkForm, development_name: event.target.value })} /></label><label>Unidade/lote<input value={linkForm.unit_reference} onChange={(event) => setLinkForm({ ...linkForm, unit_reference: event.target.value })} /></label><label>Relação<select value={linkForm.relationship} onChange={(event) => setLinkForm({ ...linkForm, relationship: event.target.value })}><option value="owner">Proprietário</option><option value="co_owner">Coproprietário</option><option value="interested">Interessado</option><option value="representative">Representante</option></select></label></div><button className="outline" onClick={createPropertyLink}><Building2 /> Registrar vínculo</button><div className="crm-links">{editingContact.property_links.map((link) => <span key={link.id}>{link.property_title || `${link.development_name} ${link.unit_reference}`}</span>)}</div></div><div className="crm-timeline"><h3>Histórico de atendimento</h3><div className="crm-note-form"><textarea rows={3} placeholder="Registrar ligação, conversa ou observação" value={activityNote} onChange={(event) => setActivityNote(event.target.value)} /><button className="outline" onClick={addActivity}><Plus /> Adicionar</button></div>{(activitiesQuery.data ?? []).map((activity) => <article key={activity.id}><i /><span><b>{activity.kind}</b><p>{activity.description}</p><small>{new Date(activity.created_at).toLocaleString("pt-BR")}{activity.actor_name ? ` · ${activity.actor_name}` : ""}</small></span></article>)}</div></>}
+      </section>}
+      <section className="admin-card"><div className="crm-contact-list">{filteredContacts.map((contact) => <button key={contact.id} onClick={() => editContact(contact)}><span className="crm-avatar">{contact.name.slice(0, 1)}</span><span><b>{contact.name}</b><small>{contact.phone || contact.email || "Sem contato informado"}</small></span><span><i>{contact.profile}</i><small>{contact.property_links.length} imóvel(is) · {contact.opportunity_count} oportunidade(s)</small></span><span><small>{maskDocument(contact.document)}</small><em>Editar</em></span></button>)}</div>{!filteredContacts.length && <p className="filter-empty">Nenhum contato encontrado.</p>}</section>
+    </>}
+
+    {tab === "tasks" && <><section className="admin-card crm-create-row"><h2>Nova tarefa ou visita</h2><div className="form-grid"><label>Contato<select value={taskForm.contact} onChange={(event) => setTaskForm({ ...taskForm, contact: event.target.value })}><option value="">Selecione</option>{contacts.map((contact) => <option value={contact.id} key={contact.id}>{contact.name}</option>)}</select></label><label>Oportunidade<select value={taskForm.opportunity} onChange={(event) => setTaskForm({ ...taskForm, opportunity: event.target.value })}><option value="">Sem oportunidade</option>{opportunities.filter((item) => !taskForm.contact || item.contact === taskForm.contact).map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label><label>Tipo<select value={taskForm.kind} onChange={(event) => setTaskForm({ ...taskForm, kind: event.target.value })}><option value="follow_up">Follow-up</option><option value="call">Ligação</option><option value="whatsapp">WhatsApp</option><option value="email">E-mail</option><option value="visit">Visita</option></select></label><label>Tarefa<input value={taskForm.title} onChange={(event) => setTaskForm({ ...taskForm, title: event.target.value })} /></label><label>Data e hora<input type="datetime-local" value={taskForm.due_at} onChange={(event) => setTaskForm({ ...taskForm, due_at: event.target.value })} /></label>{session.can_view_all_crm && <label>Corretor responsável<select value={taskForm.broker} onChange={(event) => setTaskForm({ ...taskForm, broker: event.target.value })}><option value="">Ainda não atribuído</option>{teamReference.map((broker) => <option value={broker.id} key={broker.id}>{broker.name}</option>)}</select></label>}</div><button className="gold-button" onClick={createTask}><Plus /> Criar tarefa</button></section><section className="admin-card crm-task-list">{tasks.map((task) => <article key={task.id} className={task.status}><div><b>{task.title}</b><span>{task.contact_name}{task.property_title ? ` · ${task.property_title}` : ""}</span></div><time>{new Date(task.due_at).toLocaleString("pt-BR")}</time><button className="outline" onClick={() => completeTask(task)}>{task.status === "completed" ? "Reabrir" : "Concluir"}</button></article>)}{!tasks.length && <p className="filter-empty">Nenhuma tarefa cadastrada.</p>}</section></>}
+
+    {tab === "proposals" && <><section className="admin-card crm-create-row"><h2>Nova proposta</h2><p>Registre as condições sem sobrescrever versões anteriores.</p><div className="form-grid"><label>Oportunidade<select value={proposalForm.opportunity} onChange={(event) => setProposalForm({ ...proposalForm, opportunity: event.target.value })}><option value="">Selecione</option>{opportunities.map((item) => <option value={item.id} key={item.id}>{item.contact_name} — {item.title}</option>)}</select></label><label>Valor total<input inputMode="decimal" value={proposalForm.total_value} onChange={(event) => setProposalForm({ ...proposalForm, total_value: event.target.value })} /></label><label>Entrada/ato<input inputMode="decimal" value={proposalForm.down_payment} onChange={(event) => setProposalForm({ ...proposalForm, down_payment: event.target.value })} /></label><label>Financiamento<input inputMode="decimal" value={proposalForm.financing_value} onChange={(event) => setProposalForm({ ...proposalForm, financing_value: event.target.value })} /></label><label>Nº de parcelas<input type="number" min="0" value={proposalForm.installment_count} onChange={(event) => setProposalForm({ ...proposalForm, installment_count: event.target.value })} /></label><label>Valor da parcela<input inputMode="decimal" value={proposalForm.installment_value} onChange={(event) => setProposalForm({ ...proposalForm, installment_value: event.target.value })} /></label><label>Nº de reforços<input type="number" min="0" value={proposalForm.reinforcement_count} onChange={(event) => setProposalForm({ ...proposalForm, reinforcement_count: event.target.value })} /></label><label>Valor do reforço<input inputMode="decimal" value={proposalForm.reinforcement_value} onChange={(event) => setProposalForm({ ...proposalForm, reinforcement_value: event.target.value })} /></label><label>Bem em dação<input placeholder="Ex.: veículo, terreno, jet" value={proposalForm.exchange_description} onChange={(event) => setProposalForm({ ...proposalForm, exchange_description: event.target.value })} /></label><label>Valor da dação<input inputMode="decimal" value={proposalForm.exchange_value} onChange={(event) => setProposalForm({ ...proposalForm, exchange_value: event.target.value })} /></label><label>Válida até<input type="date" value={proposalForm.valid_until} onChange={(event) => setProposalForm({ ...proposalForm, valid_until: event.target.value })} /></label><label>Observações<textarea value={proposalForm.notes} onChange={(event) => setProposalForm({ ...proposalForm, notes: event.target.value })} /></label></div><button className="gold-button" onClick={createProposal}><BadgeDollarSign /> Criar proposta</button></section><section className="admin-card crm-proposal-list">{(proposalsQuery.data ?? []).map((proposal) => <article key={proposal.id}><span><b>{proposal.contact_name} · versão {proposal.version}</b><small>{proposal.property_title || "Atendimento geral"} · {Number(proposal.total_value).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</small></span><span><small>Entrada: {Number(proposal.down_payment).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</small><small>{proposal.installments[0]?.count || 0} parcela(s) · {proposal.annual_reinforcements[0]?.count || 0} reforço(s)</small></span><select value={proposal.status} onChange={(event) => updateProposalStatus(proposal, event.target.value as CRMProposal["status"])}><option value="draft">Rascunho</option><option value="sent">Enviada</option><option value="analysis">Em análise</option><option value="counter">Contraproposta</option><option value="accepted">Aceita</option><option value="rejected">Recusada</option><option value="expired">Expirada</option></select></article>)}{!(proposalsQuery.data ?? []).length && <p className="filter-empty">Nenhuma proposta registrada.</p>}</section></>}
+
+    {tab === "imports" && <>
+      <section className="admin-card crm-import-upload"><div><h2>Importar e sanear contatos</h2><p>PDF e CSV entram em quarentena. Revise erros e duplicidades antes de confirmar.</p></div><div className="form-grid"><label>Identificação da base<input value={importLabel} onChange={(event) => setImportLabel(event.target.value)} /></label><label>Arquivo PDF ou CSV<input type="file" accept=".pdf,.csv,application/pdf,text/csv" onChange={(event) => setImportFile(event.target.files?.[0] ?? null)} /></label></div><button className="gold-button" disabled={busy} onClick={uploadImport}><Upload /> {busy ? "Processando…" : "Enviar para quarentena"}</button></section>
+      <section className="admin-card"><h2>Importações</h2><div className="crm-import-list">{(importsQuery.data ?? []).map((batch) => <button className={currentBatch === batch.id ? "active" : ""} key={batch.id} onClick={() => setCurrentBatch(batch.id)}><span><b>{batch.source_label || "Importação"}</b><small>{formatDate(batch.created_at)}</small></span><i>{batch.status}</i><span>{batch.total_rows} registros</span></button>)}</div></section>
+      {selectedBatch && <section className="admin-card crm-import-review">
+        <header><div><h2>Revisão da importação</h2><p>{selectedBatch.valid_rows} prontos · {selectedBatch.duplicate_rows} duplicados · {selectedBatch.error_rows} com erro · {selectedBatch.imported_rows} importados</p></div>{selectedBatch.status === "review" && <span className="crm-import-actions">{selectedBatch.error_rows > 0 && <button className="outline" disabled={busy} onClick={ignoreAllInvalidRows}>Ignorar todos os inválidos</button>}<button className="gold-button" disabled={busy || selectedBatch.error_rows > 0} onClick={commitImport}><CheckCircle2 /> Importar somente novos</button></span>}</header>
+        {selectedBatch.error_rows > 0 && <p className="admin-error">Corrija individualmente ou ignore todos os registros inválidos para continuar.</p>}
+        <div className="crm-import-rows">{(rowsQuery.data ?? []).map((row) => <article key={row.id} className={row.status}><span><b>#{row.row_number} {row.normalized_data.name}</b><small>{row.normalized_data.unit_reference} · {row.normalized_data.email || row.normalized_data.phone}</small></span><i>{row.status === "duplicate" ? `Duplicado${row.matched_contact_name ? `: ${row.matched_contact_name}` : ` da linha ${row.normalized_data.duplicate_of_row}`} — não será importado` : row.status}</i>{row.errors.length > 0 && <span><small>{row.errors.join(" ")}</small><span className="crm-row-actions"><button className="outline" onClick={() => editImportRow(row)}>Corrigir</button><button className="outline" onClick={() => ignoreImportRow(row)}>Ignorar</button></span></span>}{editingImportRow?.id === row.id && <div className="crm-row-editor"><label>Nome<input value={importRowForm.name ?? ""} onChange={(event) => setImportRowForm({ ...importRowForm, name: event.target.value })} /></label><label>CPF/CNPJ<input value={importRowForm.document ?? ""} onChange={(event) => setImportRowForm({ ...importRowForm, document: event.target.value })} /></label><label>Telefone<input value={importRowForm.phone ?? ""} onChange={(event) => setImportRowForm({ ...importRowForm, phone: event.target.value })} /></label><label>E-mail<input value={importRowForm.email ?? ""} onChange={(event) => setImportRowForm({ ...importRowForm, email: event.target.value })} /></label><label>Unidade<input value={importRowForm.unit_reference ?? ""} onChange={(event) => setImportRowForm({ ...importRowForm, unit_reference: event.target.value })} /></label><span><button className="gold-button" onClick={saveImportRow}>Validar correção</button><button className="outline" onClick={() => setEditingImportRow(null)}>Cancelar</button></span></div>}</article>)}</div>
+      </section>}
+    </>}
+
+    {tab === "reports" && <>
+      <section className="admin-card crm-report-filter"><div><h2>Relatórios comerciais</h2><p>{session.can_view_all_crm ? "Visão consolidada da operação e do desempenho da equipe." : "Indicadores da sua carteira comercial."}</p></div><div><label>De<input type="date" value={reportDates.date_from} onChange={(event) => setReportDates({ ...reportDates, date_from: event.target.value })} /></label><label>Até<input type="date" value={reportDates.date_to} onChange={(event) => setReportDates({ ...reportDates, date_to: event.target.value })} /></label></div></section>
+      {reportsQuery.data && <>
+        <div className="metrics crm-report-metrics">
+          <div><span>Novos contatos</span><strong>{reportsQuery.data.metrics.new_contacts}</strong></div>
+          <div><span>Oportunidades</span><strong>{reportsQuery.data.metrics.new_opportunities}</strong></div>
+          <div><span>Conversão</span><strong>{reportsQuery.data.metrics.conversion_rate}%</strong></div>
+          <div><span>Vendas fechadas</span><strong>{reportsQuery.data.metrics.won}</strong></div>
+          <div><span>Volume fechado</span><strong>{reportsQuery.data.metrics.won_value.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 })}</strong></div>
+          <div><span>Pipeline aberto</span><strong>{reportsQuery.data.metrics.pipeline_value.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 })}</strong></div>
+          <div><span>Ciclo médio</span><strong>{reportsQuery.data.metrics.average_cycle_days} dias</strong></div>
+          <div><span>Tarefas atrasadas</span><strong>{reportsQuery.data.metrics.overdue_tasks}</strong></div>
+        </div>
+        <div className="crm-report-grid">
+          <section className="admin-card"><h2>Funil atual</h2><div className="crm-report-bars">{reportsQuery.data.by_stage.map((item) => <article key={item.stage}><span><b>{item.label}</b><small>{item.total} oportunidade(s) · {item.value.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 })}</small></span><i style={{ width: `${Math.max(4, item.total * 100 / Math.max(1, ...reportsQuery.data.by_stage.map((stage) => stage.total)))}%` }} /></article>)}</div></section>
+          <section className="admin-card"><h2>Origem dos leads</h2><div className="crm-report-ranking">{reportsQuery.data.by_source.map((item) => <article key={item.source}><b>{item.source || "Não informada"}</b><span>{item.total}</span></article>)}{!reportsQuery.data.by_source.length && <p className="filter-empty">Sem oportunidades no período.</p>}</div></section>
+        </div>
+        <section className="admin-card"><h2>Desempenho por corretor</h2><div className="crm-report-table"><div className="head"><b>Corretor</b><b>Oportunidades</b><b>Fechadas</b><b>Conversão</b><b>Volume</b><b>Atrasos</b></div>{reportsQuery.data.broker_performance.map((item) => <div key={item.broker_id}><span>{item.broker_name}</span><span>{item.opportunities}</span><span>{item.won}</span><span>{item.conversion_rate}%</span><span>{item.won_value.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 })}</span><span>{item.overdue_tasks}</span></div>)}</div></section>
+        <div className="crm-report-grid"><section className="admin-card"><h2>Atividade do período</h2><div className="crm-report-ranking"><article><b>Visitas concluídas</b><span>{reportsQuery.data.metrics.completed_visits}</span></article><article><b>Propostas movimentadas</b><span>{reportsQuery.data.metrics.sent_proposals}</span></article><article><b>Negócios perdidos</b><span>{reportsQuery.data.metrics.lost}</span></article></div></section><section className="admin-card"><h2>Principais motivos de perda</h2><div className="crm-report-ranking">{reportsQuery.data.loss_reasons.map((item) => <article key={item.loss_reason}><b>{item.loss_reason}</b><span>{item.total}</span></article>)}{!reportsQuery.data.loss_reasons.length && <p className="filter-empty">Nenhum motivo registrado no período.</p>}</div></section></div>
+      </>}
+    </>}
+
+    {tab === "notifications" && <section className="admin-card crm-notifications"><header><div><h2>Central de avisos</h2><p>Atribuições, compromissos próximos e tarefas atrasadas.</p></div>{unreadNotifications > 0 && <button className="outline" onClick={markAllNotificationsRead}>Marcar todas como lidas</button>}</header>{notifications.map((notification) => <button key={notification.id} className={`${notification.priority} ${notification.read_at ? "read" : "unread"}`} onClick={() => markNotificationRead(notification)}><span><i /><b>{notification.title}</b><small>{notification.message}</small></span><time>{new Date(notification.created_at).toLocaleString("pt-BR")}</time></button>)}{!notifications.length && <p className="filter-empty">Nenhum aviso no momento.</p>}</section>}
+
+    {tab === "team" && session.can_manage_team && <>
+      <section className="admin-card crm-team-form"><div><h2>Novo acesso comercial</h2><p>Gestores enxergam toda a operação; corretores acessam somente a própria carteira.</p></div><div className="form-grid"><label>Nome<input value={brokerForm.name} onChange={(event) => setBrokerForm({ ...brokerForm, name: event.target.value })} /></label><label>E-mail<input type="email" value={brokerForm.email} onChange={(event) => setBrokerForm({ ...brokerForm, email: event.target.value })} /></label><label>Telefone<input value={brokerForm.phone} onChange={(event) => setBrokerForm({ ...brokerForm, phone: event.target.value })} /></label><label>Perfil<select value={brokerForm.role} onChange={(event) => setBrokerForm({ ...brokerForm, role: event.target.value })}><option value="broker">Corretor — somente sua carteira</option><option value="manager">Gestor — todo o CRM</option></select></label><label>Usuário<input autoComplete="off" value={brokerForm.username} onChange={(event) => setBrokerForm({ ...brokerForm, username: event.target.value })} /></label><label>Senha provisória<input type="password" autoComplete="new-password" value={brokerForm.password} onChange={(event) => setBrokerForm({ ...brokerForm, password: event.target.value })} /></label></div><button className="gold-button" onClick={createBrokerAccess}><UserPlus /> Criar acesso</button></section>
+      <section className="admin-card crm-team-list"><h2>Equipe comercial</h2>{(brokersQuery.data ?? []).map((broker) => <article key={broker.id}><span className="crm-avatar">{broker.name.slice(0, 1)}</span><span><b>{broker.name}</b><small>@{broker.user_username || "sem acesso"} · {broker.role === "manager" ? "Gestor comercial" : "Corretor"}</small></span><i className={broker.active ? "active" : "inactive"}>{broker.active ? "Ativo" : "Inativo"}</i><button className="outline" onClick={() => toggleBroker(broker)}>{broker.active ? "Desativar" : "Ativar"}</button></article>)}</section>
+    </>}
+  </div>;
 }
 
 function ClientsPanel({
