@@ -307,7 +307,15 @@ def commit_import_batch(batch, actor=None):
     if batch.rows.filter(status=CRMImportRow.Status.ERROR).exists():
         raise ValueError("Revise ou ignore todos os registros com erro antes de confirmar.")
     imported = 0
-    rows = list(batch.rows.select_for_update().select_related("matched_contact", "matched_property"))
+    # PostgreSQL cannot apply FOR UPDATE to the nullable side of the outer joins
+    # introduced by select_related(). Lock the import rows first, then hydrate
+    # their optional relations in a second query inside the same transaction.
+    locked_ids = list(batch.rows.select_for_update().values_list("id", flat=True))
+    rows = list(
+        CRMImportRow.objects.filter(id__in=locked_ids)
+        .select_related("matched_contact", "matched_property")
+        .order_by("row_number")
+    )
     # Only ready/new rows can create contacts. Duplicate rows are never merged or
     # counted as imported contacts.
     for row in rows:
