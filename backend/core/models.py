@@ -20,6 +20,20 @@ def catalog_key(value):
     return re.sub(r"[^a-z0-9]+", " ", ascii_value).strip()
 
 
+def person_name_search_key(value):
+    """Normalize common Brazilian name spelling variants for lookup."""
+    normalized = catalog_key(value)
+    words = []
+    for word in normalized.split():
+        word = word.replace("ph", "f").replace("qu", "k")
+        word = word.replace("y", "i").replace("q", "k")
+        word = re.sub(r"c(?=[aou])", "k", word)
+        word = re.sub(r"c(?=[ei])", "s", word)
+        word = re.sub(r"(.)\1+", r"\1", word)
+        words.append(word)
+    return " ".join(words)
+
+
 class TimeStamped(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -45,6 +59,7 @@ class Broker(TimeStamped):
     email = models.EmailField(blank=True)
     whatsapp = models.CharField(max_length=40, blank=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.BROKER, db_index=True)
+    can_manage_properties = models.BooleanField(default=False)
     active = models.BooleanField(default=True)
     def __str__(self): return self.name
 
@@ -302,6 +317,7 @@ class CRMContact(TimeStamped):
         ARCHIVED = "archived", "Arquivado"
 
     name = models.CharField(max_length=200, db_index=True)
+    search_name = models.CharField(max_length=200, blank=True, db_index=True, editable=False)
     person_type = models.CharField(max_length=20, choices=PersonType.choices, default=PersonType.INDIVIDUAL)
     document = models.CharField(max_length=14, null=True, blank=True, unique=True)
     phone = models.CharField(max_length=20, blank=True)
@@ -330,6 +346,7 @@ class CRMContact(TimeStamped):
 
     def save(self, *args, **kwargs):
         self.name = " ".join(self.name.split())
+        self.search_name = person_name_search_key(self.name)
         self.document = normalize_document(self.document)
         self.normalized_phone = normalize_phone(self.phone)
         self.normalized_email = normalize_email(self.email)

@@ -16,6 +16,11 @@ def can_view_all_crm(user):
     return bool(user and user.is_authenticated and (user.is_staff or (broker and broker.role == broker.Role.MANAGER)))
 
 
+def can_manage_properties(user):
+    broker = user_broker(user)
+    return bool(user and user.is_authenticated and (user.is_staff or (broker and broker.can_manage_properties)))
+
+
 def crm_user_payload(user):
     broker = user_broker(user)
     if user.is_staff:
@@ -24,12 +29,18 @@ def crm_user_payload(user):
         role = broker.role
     else:
         role = "none"
+    display_name = broker.name if broker else (user.get_full_name().strip() or user.username)
     return {
         "username": user.username,
+        "display_name": display_name,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "email": user.email,
         "role": role,
         "broker_id": str(broker.id) if broker else None,
         "broker_name": broker.name if broker else "",
         "can_view_all_crm": can_view_all_crm(user),
+        "can_manage_properties": can_manage_properties(user),
         "can_manage_site": user.is_staff,
         "can_manage_team": user.is_staff,
     }
@@ -43,3 +54,8 @@ class IsCRMUser(permissions.BasePermission):
 class IsCRMManager(permissions.BasePermission):
     def has_permission(self, request, view):
         return can_view_all_crm(request.user)
+
+
+class CanManageProperties(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return can_manage_properties(request.user)

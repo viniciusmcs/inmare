@@ -2,16 +2,20 @@ import os
 import tempfile
 import hashlib
 import mimetypes
+import secrets
+from io import BytesIO
 from xml.sax.saxutils import escape
 from django.conf import settings as django_settings
+from django.contrib.auth import get_user_model
 from django.db import connection, transaction
-from django.db.models import Count, Max, Min, Q, Sum
+from django.db.models import Case, Count, IntegerField, Max, Min, Q, Sum, Value, When
 from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from datetime import datetime, time, timedelta
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from django.utils.text import slugify
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
@@ -20,11 +24,18 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import AuditEvent, Broker, CRMActivity, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMPropertyLink, CRMTask, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial, catalog_key
-from .serializers import AdminLeadSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, CRMActivitySerializer, CRMContactSerializer, CRMImportBatchSerializer, CRMImportRowSerializer, CRMNotificationSerializer, CRMOpportunitySerializer, CRMProposalSerializer, CRMPropertyLinkSerializer, CRMTaskSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, ListingOptionSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from .models import AuditEvent, Broker, CRMActivity, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMPropertyLink, CRMTask, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial, catalog_key, person_name_search_key
+from .serializers import AdminLeadSerializer, AdminUserSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, CRMActivitySerializer, CRMContactPoolSerializer, CRMContactSerializer, CRMImportBatchSerializer, CRMImportRowSerializer, CRMNotificationSerializer, CRMOpportunitySerializer, CRMProposalSerializer, CRMPropertyLinkSerializer, CRMTaskSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, ListingOptionSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
 from .services import extract_property_description, import_property_folder, import_property_zip
 from .crm_services import commit_import_batch, file_sha256, find_duplicate_contact, find_duplicate_import_row, process_import_batch, sanitize_import_row, validate_crm_import
-from .crm_permissions import IsCRMManager, IsCRMUser, can_view_all_crm, crm_user_payload, user_broker
+from .crm_permissions import CanManageProperties, IsCRMManager, IsCRMUser, can_view_all_crm, crm_user_payload, user_broker
 from .media_utils import normalize_uploaded_image
 
 class LeadThrottle(AnonRateThrottle): scope = "lead"
@@ -245,6 +256,207 @@ class LeadViewSet(mixins.CreateModelMixin, viewsets.GenericViewSet):
     queryset = Lead.objects.all()
 
 
+class WhatsAppPropertyIngestView(APIView):
+    """Receives normalized WhatsApp events from the private n8n workflow."""
+
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        expected_token = django_settings.WHATSAPP_INGEST_TOKEN
+        supplied_token = request.headers.get("X-Inmare-Ingest-Token", "")
+        if not expected_token:
+            return Response({"detail": "Integração não configurada."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if not supplied_token or not secrets.compare_digest(supplied_token, expected_token):
+            return Response({"detail": "Credencial de integração inválida."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if request.data.get("accepted") is not True:
+            return Response({"accepted": False, "detail": "Evento ignorado pelo filtro do fluxo."}, status=status.HTTP_202_ACCEPTED)
+
+        normalized = request.data.get("normalized")
+        batch = request.data.get("batch")
+        if not isinstance(normalized, dict) or not isinstance(batch, dict):
+            raise ValidationError({"detail": "Evento normalizado e lote são obrigatórios."})
+
+        group_id = str(normalized.get("remoteJid") or "").strip()
+        configured_group_id = django_settings.WHATSAPP_INGEST_GROUP_ID.strip()
+        if configured_group_id and group_id != configured_group_id:
+            return Response({"detail": "Grupo não autorizado."}, status=status.HTTP_403_FORBIDDEN)
+
+        batch_id = str(batch.get("id") or "").strip()
+        message_id = str(normalized.get("messageId") or "").strip()
+        if not batch_id or not message_id:
+            raise ValidationError({"detail": "Identificadores do lote e da mensagem são obrigatórios."})
+
+        external_id = f"whatsapp:{batch_id}"[:160]
+        duplicate = AuditEvent.objects.filter(
+            action="property.whatsapp_message_received",
+            metadata__message_id=message_id,
+            metadata__group_id=group_id,
+        ).first()
+        if duplicate:
+            prop = Property.objects.filter(pk=duplicate.entity_id).first()
+            if prop:
+                return Response(self._response(prop, created=False, duplicate=True))
+
+        text = str(normalized.get("text") or "").replace("\x00", "").strip()[:12000]
+        media_type = str(normalized.get("mediaType") or "").strip()[:30]
+        file_name = str(normalized.get("fileName") or "").replace("\x00", "").strip()[:240]
+        sender = str(normalized.get("sender") or "").strip()[:120]
+        push_name = str(normalized.get("pushName") or "").replace("\x00", "").strip()[:160]
+
+        with transaction.atomic():
+            prop = Property.objects.select_for_update().filter(
+                source="whatsapp",
+                external_id=external_id,
+            ).first()
+            is_start_marker = bool(batch.get("startMarkerDetected"))
+            if prop is None and not is_start_marker:
+                recent_event = AuditEvent.objects.filter(
+                    action="property.whatsapp_message_received",
+                    metadata__group_id=group_id,
+                    created_at__gte=timezone.now() - timedelta(minutes=10),
+                ).order_by("-created_at").first()
+                if recent_event:
+                    prop = Property.objects.select_for_update().filter(
+                        pk=recent_event.entity_id,
+                        source="whatsapp",
+                        status=Property.Status.DRAFT,
+                        published=False,
+                    ).first()
+            created = prop is None
+            if created:
+                placeholder = f"[WhatsApp] Imóvel recebido em {timezone.localtime():%d/%m/%Y %H:%M}"
+                prop = Property.objects.create(
+                    title=placeholder,
+                    slug=self._unique_slug(placeholder, external_id),
+                    public_description="",
+                    property_type="",
+                    purpose=Property.Purpose.SALE,
+                    status=Property.Status.DRAFT,
+                    city="",
+                    neighborhood="",
+                    published=False,
+                    hidden=False,
+                    featured=False,
+                    source="whatsapp",
+                    external_id=external_id,
+                    internal_notes=(
+                        "Recebido automaticamente do WhatsApp.\n"
+                        "Status: aguardando revisão administrativa.\n"
+                        f"Grupo: {group_id}\n"
+                        f"Lote: {batch_id}\n"
+                    ),
+                )
+
+            entry = [f"\n--- Mensagem {message_id} ---"]
+            if push_name or sender:
+                entry.append(f"Remetente: {push_name or 'Não informado'} ({sender or 'ID não informado'})")
+            if text:
+                entry.append(text)
+            if media_type:
+                media_label = f"Mídia recebida: {media_type}"
+                if file_name:
+                    media_label += f" — {file_name}"
+                entry.append(media_label)
+            prop.internal_notes = (prop.internal_notes + "\n".join(entry))[-500000:]
+            self._apply_safe_suggestions(prop, text, is_start_marker)
+            prop.save()
+
+            AuditEvent.objects.create(
+                action="property.whatsapp_message_received",
+                entity_type="Property",
+                entity_id=str(prop.id),
+                metadata={
+                    "automatic": True,
+                    "batch_id": batch_id,
+                    "group_id": group_id,
+                    "message_id": message_id,
+                    "media_type": media_type,
+                    "created_property": created,
+                },
+            )
+
+        return Response(
+            self._response(prop, created=created, duplicate=False),
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    @staticmethod
+    def _unique_slug(title, external_id):
+        suffix = hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:8]
+        base = (slugify(title) or "imovel-whatsapp")[:205]
+        candidate = f"{base}-{suffix}"[:220]
+        counter = 2
+        while Property.objects.filter(slug=candidate).exists():
+            candidate = f"{base[:200]}-{suffix}-{counter}"[:220]
+            counter += 1
+        return candidate
+
+    @staticmethod
+    def _catalog_value(kind, value, city=""):
+        if not value:
+            return ""
+        filters = {"kind": kind, "key": catalog_key(str(value)), "active": True}
+        if kind == ListingOption.Kind.NEIGHBORHOOD:
+            filters["city_key"] = catalog_key(city)
+        option = ListingOption.objects.filter(**filters).first()
+        return option.name if option else ""
+
+    def _apply_safe_suggestions(self, prop, text, is_start_marker):
+        if not text:
+            return
+        suggestions = extract_property_description(text)
+
+        def value(field):
+            suggestion = suggestions.get(field)
+            return suggestion.get("value") if isinstance(suggestion, dict) else None
+
+        suggested_title = value("title")
+        if suggested_title and not is_start_marker and prop.title.startswith("[WhatsApp]"):
+            prop.title = str(suggested_title)[:200]
+            prop.slug = self._unique_slug(prop.title, prop.external_id)
+
+        for field in (
+            "price", "condominium_fee", "iptu", "bedrooms", "suites", "bathrooms",
+            "parking_spaces", "private_area", "total_area", "land_dimensions",
+            "solar_orientation", "accepts_financing", "accepts_exchange",
+            "private_address", "private_commission",
+        ):
+            suggested = value(field)
+            if suggested not in (None, "", []) and getattr(prop, field) in (None, "", []):
+                setattr(prop, field, suggested)
+
+        suggested_features = value("features")
+        if isinstance(suggested_features, list):
+            prop.features = list(dict.fromkeys([*(prop.features or []), *suggested_features]))[:100]
+
+        if not prop.property_type:
+            prop.property_type = self._catalog_value(ListingOption.Kind.PROPERTY_TYPE, value("property_type"))
+        if not prop.city:
+            prop.city = self._catalog_value(ListingOption.Kind.CITY, value("city"))
+        if not prop.neighborhood and prop.city:
+            prop.neighborhood = self._catalog_value(
+                ListingOption.Kind.NEIGHBORHOOD,
+                value("neighborhood"),
+                city=prop.city,
+            )
+
+    @staticmethod
+    def _response(prop, *, created, duplicate):
+        return {
+            "accepted": True,
+            "created": created,
+            "duplicate": duplicate,
+            "property_id": str(prop.id),
+            "public_id": prop.public_id,
+            "status": prop.status,
+            "published": prop.published,
+            "source": prop.source,
+            "review_status": "pending_admin_review" if not prop.published else "published",
+        }
+
+
 class AdminListingOptionViewSet(
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
@@ -255,6 +467,11 @@ class AdminListingOptionViewSet(
     permission_classes = [permissions.IsAdminUser]
     serializer_class = ListingOptionSerializer
     pagination_class = None
+
+    def get_permissions(self):
+        if self.action == "list":
+            return [CanManageProperties()]
+        return [permissions.IsAdminUser()]
 
     def get_queryset(self):
         return ListingOption.objects.filter(active=True)
@@ -347,17 +564,66 @@ class AdminListingOptionViewSet(
 
 
 class AdminPropertyViewSet(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [CanManageProperties]
     serializer_class = AdminPropertySerializer
     queryset = Property.objects.all().select_related("broker").prefetch_related("media")
     filterset_fields = ("status", "published", "hidden", "featured", "launch", "city")
     search_fields = ("title", "public_id", "city", "neighborhood")
+
+    ADMIN_ONLY_ACTIONS = {
+        "destroy", "publish", "validate_media", "toggle_featured", "toggle_launch",
+        "mark_in_service", "remove_in_service", "mark_sold", "restore_sale",
+        "confirm_review", "archive", "restore_archive",
+    }
+
+    def get_permissions(self):
+        if self.action in self.ADMIN_ONLY_ACTIONS:
+            return [permissions.IsAdminUser()]
+        return [CanManageProperties()]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if not self.request.user.is_staff:
+            queryset = queryset.filter(broker=user_broker(self.request.user))
+        return queryset.annotate(
+            whatsapp_review_priority=Case(
+                When(
+                    source="whatsapp",
+                    status=Property.Status.DRAFT,
+                    published=False,
+                    then=Value(0),
+                ),
+                default=Value(1),
+                output_field=IntegerField(),
+            ),
+        ).order_by("whatsapp_review_priority", "-created_at")
     def perform_create(self, serializer):
-        prop = serializer.save()
+        if self.request.user.is_staff:
+            prop = serializer.save()
+        else:
+            prop = serializer.save(
+                broker=user_broker(self.request.user), status=Property.Status.DRAFT,
+                published=False, hidden=False, featured=False, launch=False,
+                reviewed_at=None, archived_at=None, source="broker",
+            )
         AuditEvent.objects.create(actor=self.request.user, action="property.created", entity_type="Property", entity_id=str(prop.id))
     def perform_update(self, serializer):
-        prop = serializer.save()
+        if self.request.user.is_staff:
+            prop = serializer.save()
+        else:
+            current = serializer.instance
+            if current.status != Property.Status.DRAFT or current.published:
+                raise ValidationError({"detail": "O corretor pode editar somente os próprios imóveis em rascunho."})
+            prop = serializer.save(
+                broker=user_broker(self.request.user), status=Property.Status.DRAFT,
+                published=False, hidden=False, featured=False, launch=False,
+                reviewed_at=None, archived_at=None,
+            )
         AuditEvent.objects.create(actor=self.request.user, action="property.updated", entity_type="Property", entity_id=str(prop.id))
+
+    def _ensure_editable_draft(self, prop):
+        if not self.request.user.is_staff and (prop.status != Property.Status.DRAFT or prop.published):
+            raise ValidationError({"detail": "O corretor pode alterar mídias somente em imóveis em rascunho."})
     def destroy(self, request, *args, **kwargs):
         prop = self.get_object()
         property_id = str(prop.id)
@@ -395,6 +661,7 @@ class AdminPropertyViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="media")
     def upload_media(self, request, pk=None):
         prop = self.get_object()
+        self._ensure_editable_draft(prop)
         upload = request.FILES.get("file")
         if not upload: raise ValidationError({"file": "Selecione um arquivo."})
         original_extension = os.path.splitext(upload.name)[1].lower()
@@ -440,6 +707,7 @@ class AdminPropertyViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["delete"], url_path=r"media/(?P<media_id>[^/.]+)")
     def delete_media(self, request, pk=None, media_id=None):
         prop = self.get_object()
+        self._ensure_editable_draft(prop)
         media = get_object_or_404(prop.media.all(), pk=media_id)
         file_name = media.file.name if media.file else ""
         file_storage = media.file.storage if media.file else None
@@ -478,6 +746,7 @@ class AdminPropertyViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="media/(?P<media_id>[^/.]+)/primary")
     def set_primary_media(self, request, pk=None, media_id=None):
         prop = self.get_object()
+        self._ensure_editable_draft(prop)
         media = prop.media.get(pk=media_id, kind=Media.Kind.IMAGE)
         with transaction.atomic():
             prop.media.filter(kind=Media.Kind.IMAGE, is_primary=True).update(is_primary=False)
@@ -487,6 +756,7 @@ class AdminPropertyViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="media-order")
     def media_order(self, request, pk=None):
         prop = self.get_object()
+        self._ensure_editable_draft(prop)
         ordered_ids = request.data.get("media_ids")
         if not isinstance(ordered_ids, list):
             raise ValidationError({"media_ids": "Informe a ordem das mídias."})
@@ -734,6 +1004,76 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
             opportunity_count=Count("opportunities", distinct=True),
             pending_task_count=Count("tasks", filter=Q(tasks__status=CRMTask.Status.PENDING), distinct=True),
         ).order_by("name", "created_at")
+
+    @action(detail=False, methods=["get"], url_path="available")
+    def available(self, request):
+        queryset = CRMContact.objects.filter(
+            assigned_broker__isnull=True,
+            status=CRMContact.Status.ACTIVE,
+        ).exclude(
+            opportunities__broker__isnull=False,
+        ).exclude(
+            tasks__broker__isnull=False,
+        ).distinct().order_by("name", "created_at")
+        search = person_name_search_key(request.query_params.get("search", ""))
+        if search:
+            queryset = queryset.filter(search_name__contains=search)
+        page = self.paginate_queryset(queryset)
+        serializer = CRMContactPoolSerializer(page if page is not None else queryset, many=True)
+        return self.get_paginated_response(serializer.data) if page is not None else Response(serializer.data)
+
+    @action(detail=True, methods=["post"], url_path="claim")
+    def claim(self, request, pk=None):
+        broker = user_broker(request.user)
+        if not broker:
+            raise ValidationError({"detail": "Somente um corretor ou gestor comercial pode assumir atendimentos."})
+        with transaction.atomic():
+            contact = get_object_or_404(
+                CRMContact.objects.select_for_update(),
+                pk=pk,
+                status=CRMContact.Status.ACTIVE,
+            )
+            if contact.assigned_broker_id and contact.assigned_broker_id != broker.id:
+                raise ValidationError({"detail": "Este contato já foi assumido por outro corretor."})
+            already_assigned = contact.assigned_broker_id == broker.id
+            if not already_assigned:
+                contact.assigned_broker = broker
+                contact.save(update_fields=["assigned_broker", "updated_at"])
+            opportunity = contact.opportunities.select_for_update().filter(
+                broker__isnull=True,
+            ).exclude(
+                stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST],
+            ).order_by("created_at").first()
+            if opportunity:
+                opportunity.broker = broker
+                opportunity.save(update_fields=["broker", "updated_at"])
+            elif not contact.opportunities.filter(
+                broker=broker,
+            ).exclude(stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST]).exists():
+                opportunity = CRMOpportunity.objects.create(
+                    contact=contact,
+                    broker=broker,
+                    title=f"Atendimento de {contact.name}"[:200],
+                    stage=CRMOpportunity.Stage.NEW,
+                    source="shared_pool",
+                )
+            if not already_assigned:
+                CRMActivity.objects.create(
+                    contact=contact,
+                    opportunity=opportunity,
+                    actor=request.user,
+                    kind=CRMActivity.Kind.NOTE,
+                    description=f"Atendimento assumido por {broker.name}.",
+                    metadata={"event": "contact_claimed", "broker_id": str(broker.id)},
+                )
+                AuditEvent.objects.create(
+                    actor=request.user,
+                    action="crm.contact.claimed",
+                    entity_type="CRMContact",
+                    entity_id=str(contact.id),
+                    metadata={"broker_id": str(broker.id)},
+                )
+        return Response({"detail": "Contato adicionado à sua carteira.", "contact_id": str(contact.id)})
 
 
 class AdminCRMPropertyLinkViewSet(CRMAuditMixin, viewsets.ModelViewSet):
@@ -1124,7 +1464,7 @@ class CRMReportView(APIView):
                 "overdue_tasks": tasks.filter(broker=broker, status=CRMTask.Status.PENDING, due_at__lt=timezone.now()).count(),
             })
 
-        return Response({
+        payload = {
             "period": {"date_from": start_date, "date_to": end_date},
             "metrics": {
                 "new_contacts": contacts.count(),
@@ -1144,11 +1484,142 @@ class CRMReportView(APIView):
             "loss_reasons": list(loss_rows),
             "broker_performance": broker_performance,
             "trend": list(trend.values()),
-        })
+        }
+        export_format = request.query_params.get("export", "").lower()
+        if export_format == "xlsx":
+            return self._xlsx_response(payload)
+        if export_format == "pdf":
+            return self._pdf_response(payload)
+        if export_format:
+            raise ValidationError({"export": "Formato inválido. Use xlsx ou pdf."})
+        return Response(payload)
+
+    @staticmethod
+    def _filename(payload, extension):
+        return f"relatorio-crm-{payload['period']['date_from']}-a-{payload['period']['date_to']}.{extension}"
+
+    @classmethod
+    def _xlsx_response(cls, payload):
+        workbook = Workbook()
+        summary = workbook.active
+        summary.title = "Resumo"
+        navy = "0B2947"
+        gold = "C89B3C"
+
+        def write_sheet(sheet, headers, rows):
+            sheet.append(headers)
+            for cell in sheet[1]:
+                cell.fill = PatternFill("solid", fgColor=navy)
+                cell.font = Font(color="FFFFFF", bold=True)
+                cell.alignment = Alignment(horizontal="center")
+            for row in rows:
+                sheet.append(row)
+            sheet.freeze_panes = "A2"
+            sheet.auto_filter.ref = sheet.dimensions
+            for column in sheet.columns:
+                letter = column[0].column_letter
+                width = min(42, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
+                sheet.column_dimensions[letter].width = width
+
+        metric_labels = {
+            "new_contacts": "Novos contatos", "new_opportunities": "Novas oportunidades",
+            "won": "Vendas fechadas", "lost": "Negócios perdidos", "conversion_rate": "Conversão (%)",
+            "pipeline_value": "Pipeline aberto (R$)", "won_value": "Volume fechado (R$)",
+            "average_cycle_days": "Ciclo médio (dias)", "overdue_tasks": "Tarefas atrasadas",
+            "completed_visits": "Visitas concluídas", "sent_proposals": "Propostas movimentadas",
+        }
+        summary.append(["RELATÓRIO COMERCIAL IN MARE"])
+        summary["A1"].font = Font(size=16, bold=True, color=navy)
+        summary.append(["Período", str(payload["period"]["date_from"]), str(payload["period"]["date_to"])])
+        summary.append([])
+        summary.append(["Indicador", "Valor"])
+        for cell in summary[4]:
+            cell.fill = PatternFill("solid", fgColor=gold)
+            cell.font = Font(bold=True, color=navy)
+        for key, value in payload["metrics"].items():
+            summary.append([metric_labels.get(key, key), value])
+        summary.column_dimensions["A"].width = 32
+        summary.column_dimensions["B"].width = 20
+        summary.column_dimensions["C"].width = 16
+
+        sheet = workbook.create_sheet("Funil")
+        write_sheet(sheet, ["Etapa", "Oportunidades", "Valor (R$)"], [[row["label"], row["total"], row["value"]] for row in payload["by_stage"]])
+        sheet = workbook.create_sheet("Origens")
+        write_sheet(sheet, ["Origem", "Oportunidades"], [[row["source"] or "Não informada", row["total"]] for row in payload["by_source"]])
+        sheet = workbook.create_sheet("Equipe")
+        write_sheet(sheet, ["Corretor", "Oportunidades", "Ganhas", "Perdidas", "Conversão (%)", "Volume (R$)", "Atrasos"], [
+            [row["broker_name"], row["opportunities"], row["won"], row["lost"], row["conversion_rate"], row["won_value"], row["overdue_tasks"]]
+            for row in payload["broker_performance"]
+        ])
+        sheet = workbook.create_sheet("Evolução diária")
+        write_sheet(sheet, ["Data", "Novas oportunidades", "Vendas fechadas"], [[row["date"], row["opportunities"], row["won"]] for row in payload["trend"]])
+        sheet = workbook.create_sheet("Motivos de perda")
+        write_sheet(sheet, ["Motivo", "Quantidade"], [[row["loss_reason"], row["total"]] for row in payload["loss_reasons"]])
+
+        output = BytesIO()
+        workbook.save(output)
+        response = HttpResponse(output.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response["Content-Disposition"] = f'attachment; filename="{cls._filename(payload, "xlsx")}"'
+        return response
+
+    @classmethod
+    def _pdf_response(cls, payload):
+        output = BytesIO()
+        document = SimpleDocTemplate(output, pagesize=landscape(A4), rightMargin=12 * mm, leftMargin=12 * mm, topMargin=12 * mm, bottomMargin=12 * mm)
+        styles = getSampleStyleSheet()
+        story = [Paragraph("Relatório comercial In Mare", styles["Title"]), Paragraph(
+            f"Período: {payload['period']['date_from']} a {payload['period']['date_to']}", styles["Normal"]
+        ), Spacer(1, 5 * mm)]
+        metrics = payload["metrics"]
+        summary_rows = [
+            ["Novos contatos", "Oportunidades", "Conversão", "Vendas", "Volume fechado", "Pipeline", "Atrasos"],
+            [metrics["new_contacts"], metrics["new_opportunities"], f'{metrics["conversion_rate"]}%', metrics["won"],
+             f'R$ {metrics["won_value"]:,.2f}', f'R$ {metrics["pipeline_value"]:,.2f}', metrics["overdue_tasks"]],
+        ]
+        header_style = TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0B2947")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("GRID", (0, 0), (-1, -1), .35, colors.HexColor("#C8D2DC")),
+            ("ALIGN", (1, 1), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F6F8")]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ])
+        table = Table(summary_rows, repeatRows=1)
+        table.setStyle(header_style)
+        story.extend([table, Spacer(1, 6 * mm), Paragraph("Desempenho da equipe", styles["Heading2"])])
+        team_rows = [["Corretor", "Oportunidades", "Ganhas", "Perdidas", "Conversão", "Volume", "Atrasos"]]
+        team_rows.extend([[row["broker_name"], row["opportunities"], row["won"], row["lost"], f'{row["conversion_rate"]}%', f'R$ {row["won_value"]:,.2f}', row["overdue_tasks"]] for row in payload["broker_performance"]])
+        if len(team_rows) == 1:
+            team_rows.append(["Sem dados", "-", "-", "-", "-", "-", "-"])
+        table = Table(team_rows, repeatRows=1, colWidths=[58 * mm, 28 * mm, 20 * mm, 20 * mm, 25 * mm, 38 * mm, 20 * mm])
+        table.setStyle(header_style)
+        story.extend([table, Spacer(1, 6 * mm), Paragraph("Funil atual", styles["Heading2"])])
+        funnel_rows = [["Etapa", "Oportunidades", "Valor"]] + [[row["label"], row["total"], f'R$ {row["value"]:,.2f}'] for row in payload["by_stage"]]
+        table = Table(funnel_rows, repeatRows=1, colWidths=[75 * mm, 40 * mm, 55 * mm])
+        table.setStyle(header_style)
+        story.append(table)
+        document.build(story)
+        response = HttpResponse(output.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{cls._filename(payload, "pdf")}"'
+        return response
 
 
 class AdminBrokerViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = BrokerSerializer; queryset = Broker.objects.all()
+class AdminUserViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, viewsets.GenericViewSet):
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = AdminUserSerializer
+
+    def get_queryset(self):
+        return get_user_model().objects.filter(is_staff=True).order_by("-is_active", "first_name", "username")
+
+    def perform_create(self, serializer):
+        user = serializer.save()
+        AuditEvent.objects.create(actor=self.request.user, action="admin.created", entity_type="User", entity_id=str(user.pk), metadata={"username": user.username})
+
+    def perform_update(self, serializer):
+        user = serializer.save()
+        AuditEvent.objects.create(actor=self.request.user, action="admin.updated", entity_type="User", entity_id=str(user.pk), metadata={"username": user.username, "active": user.is_active})
 class AdminSettingsViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = SiteSettingsSerializer; queryset = SiteSettings.objects.all()
     def perform_update(self, serializer):

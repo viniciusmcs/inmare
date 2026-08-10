@@ -238,6 +238,12 @@ class CRMContactSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class CRMContactPoolSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CRMContact
+        fields = ("id", "name", "city", "state", "profile", "source", "created_at")
+
+
 class CRMOpportunitySerializer(serializers.ModelSerializer):
     contact_name = serializers.CharField(source="contact.name", read_only=True)
     property_title = serializers.CharField(source="property.title", read_only=True)
@@ -421,6 +427,60 @@ class BrokerSerializer(serializers.ModelSerializer):
             instance.user.is_active = validated_data.get("active", instance.active)
             instance.user.save()
         return super().update(instance, validated_data)
+
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, required=False, min_length=8)
+    display_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = get_user_model()
+        fields = (
+            "id", "username", "first_name", "last_name", "display_name", "email",
+            "is_active", "is_superuser", "date_joined", "last_login", "password",
+        )
+        read_only_fields = ("id", "display_name", "is_superuser", "date_joined", "last_login")
+
+    def get_display_name(self, obj):
+        return obj.get_full_name().strip() or obj.username
+
+    def validate_username(self, value):
+        users = get_user_model().objects.all()
+        if self.instance:
+            users = users.exclude(pk=self.instance.pk)
+        if users.filter(username__iexact=value.strip()).exists():
+            raise serializers.ValidationError("Este usuário já está em uso.")
+        return value.strip()
+
+    def validate(self, attrs):
+        if not self.instance and not attrs.get("password"):
+            raise serializers.ValidationError({"password": "Informe uma senha provisória."})
+        request = self.context.get("request")
+        if self.instance and request:
+            if self.instance == request.user and attrs.get("is_active") is False:
+                raise serializers.ValidationError({"is_active": "Você não pode desativar o próprio acesso."})
+            if self.instance.is_superuser and not request.user.is_superuser:
+                raise serializers.ValidationError("Somente um superadministrador pode alterar este acesso.")
+        return attrs
+
+    def create(self, validated_data):
+        password = validated_data.pop("password")
+        return get_user_model().objects.create_user(
+            password=password,
+            is_staff=True,
+            is_superuser=False,
+            **validated_data,
+        )
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", "")
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.is_staff = True
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance
 
 
 class CRMNotificationSerializer(serializers.ModelSerializer):

@@ -14,6 +14,9 @@ import {
   CheckCircle2,
   CircleAlert,
   ClipboardList,
+  Download,
+  FileSpreadsheet,
+  FileText,
   FileUp,
   GripVertical,
   Handshake,
@@ -38,8 +41,9 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "./api";
+import { rankContactMatches } from "./contactSearch";
 import { collectPages, paginateItems } from "./pagination";
-import type { AdminSession, CRMActivity, CRMBroker, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMReport, CRMTask, FAQ, HeroSlide, InstitutionalImage, Lead, ListingOption, Page, Property, PublicContent, SiteSettings, Testimonial } from "./types";
+import type { AdminSession, AdminUser, CRMActivity, CRMAvailableContact, CRMBroker, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMReport, CRMTask, FAQ, HeroSlide, InstitutionalImage, Lead, ListingOption, Page, Property, PublicContent, SiteSettings, Testimonial } from "./types";
 
 const reviewLabels: Record<string, string> = {
   green: "Novo",
@@ -301,15 +305,16 @@ export default function AdminPanel() {
   useEffect(() => {
     if (sessionQuery.data) {
       setAuthenticated(true);
-      if (!sessionQuery.data.can_manage_site) setSection("crm");
+      if (!sessionQuery.data.can_manage_properties) setSection("crm");
     } else if (sessionQuery.isError) {
       setAuthenticated(false);
     }
   }, [sessionQuery.data, sessionQuery.isError]);
   const properties = useQuery({
     queryKey: ["admin-properties"],
-    enabled: authenticated === true && sessionQuery.data?.can_manage_site === true,
+    enabled: authenticated === true && sessionQuery.data?.can_manage_properties === true,
     retry: false,
+    refetchInterval: 10000,
     queryFn: async () => collectPages("/admin/properties/", async (url) => {
       const response = await api.get<Page<Property>>(url);
       return response.data;
@@ -317,7 +322,7 @@ export default function AdminPanel() {
   });
   const listingOptions = useQuery({
     queryKey: ["admin-listing-options"],
-    enabled: authenticated === true && sessionQuery.data?.can_manage_site === true,
+    enabled: authenticated === true && sessionQuery.data?.can_manage_properties === true,
     queryFn: async () => (await api.get<ListingOption[]>("/admin/listing-options/")).data,
   });
   const leads = useQuery({
@@ -354,7 +359,7 @@ export default function AdminPanel() {
     onSuccess: ({ data }) => {
       setAuthenticated(true);
       queryClient.setQueryData(["admin-session"], data.user);
-      if (!data.user.can_manage_site) setSection("crm");
+      if (!data.user.can_manage_properties) setSection("crm");
       queryClient.invalidateQueries({ queryKey: ["admin-properties"] });
     },
   });
@@ -658,7 +663,7 @@ export default function AdminPanel() {
       (!filters.date || property.created_at?.slice(0, 10) === filters.date)
     );
   });
-  const propertyTypes = [...new Set(list.map((property) => property.property_type))].sort();
+  const propertyTypes = [...new Set(list.map((property) => property.property_type).filter(Boolean))].sort();
   const propertiesPerPage = 10;
   const paginatedProperties = paginateItems(filteredList, propertyPage, propertiesPerPage);
   const propertyPageCount = paginatedProperties.pageCount;
@@ -690,7 +695,7 @@ export default function AdminPanel() {
         </button>
         <img src="/assets/brand/logo-transparent.png" alt="In Mare" />
         <nav id="admin-panel-nav">
-          {sessionQuery.data?.can_manage_site && <button onClick={() => { setSection("properties"); setSelected(null); setAdminMenuOpen(false); }}>
+          {sessionQuery.data?.can_manage_properties && <button onClick={() => { setSection("properties"); setSelected(null); setAdminMenuOpen(false); }}>
             <Building2 /> Imóveis
           </button>}
           {sessionQuery.data?.can_manage_site && <button onClick={() => { setSection("clients"); setSelected(null); setAdminMenuOpen(false); }}>
@@ -721,6 +726,12 @@ export default function AdminPanel() {
           <div>
             <small>PAINEL ADMINISTRATIVO</small>
             <h1>{selected ? "Editar imóvel" : section === "crm" ? "CRM comercial" : section === "clients" ? "Contatos recebidos" : section === "content" ? "Conteúdo e redes" : "Gestão de imóveis"}</h1>
+            <p className="admin-welcome">Seja bem-vindo, <b>{sessionQuery.data?.display_name || sessionQuery.data?.broker_name || sessionQuery.data?.username}</b>.</p>
+          </div>
+          <div className="admin-head-actions">
+          <div className="admin-profile-chip" title={sessionQuery.data?.email || sessionQuery.data?.username}>
+            <span>{(sessionQuery.data?.display_name || sessionQuery.data?.username || "A").slice(0, 1).toUpperCase()}</span>
+            <div><b>{sessionQuery.data?.display_name || sessionQuery.data?.username}</b><small>{sessionQuery.data?.role === "admin" ? "Administrador" : sessionQuery.data?.role === "manager" ? "Gestor comercial" : "Corretor"} · @{sessionQuery.data?.username}</small></div>
           </div>
           {section === "properties" && <button
             className="gold-button"
@@ -736,6 +747,7 @@ export default function AdminPanel() {
           >
             <Plus /> Novo imóvel
           </button>}
+          </div>
         </div>
         {section === "content" ? (
           <ContentPanel notify={(message, failed = false) => failed ? setError(message) : setNotice(message)} />
@@ -834,8 +846,12 @@ export default function AdminPanel() {
               </div>
               <div className="table">
                 {visibleProperties.map((p) => {
+                  const isWhatsAppPending =
+                    p.source === "whatsapp" && p.status === "draft" && !p.published;
                   const commercialStatus =
-                    p.status === "sold"
+                    isWhatsAppPending
+                      ? { label: "Aguardando revisão", className: "whatsapp" }
+                      : p.status === "sold"
                       ? { label: "Vendido", className: "sold" }
                       : p.status === "archived"
                         ? { label: "Arquivado", className: "archived" }
@@ -866,6 +882,11 @@ export default function AdminPanel() {
                         {p.city} • {p.neighborhood} •{" "}
                         {statusLabels[p.status] ?? p.status}
                       </small>
+                      {p.source === "whatsapp" && (
+                        <small className="whatsapp-origin">
+                          <MessageCircle /> Recebido automaticamente do WhatsApp
+                        </small>
+                      )}
                     </span>
                     <i className={commercialStatus.className}>
                       <b>{commercialStatus.label}</b>
@@ -942,6 +963,7 @@ export default function AdminPanel() {
             createListingOption={createListingOption}
             updateListingOption={updateListingOption}
             deleteListingOption={deleteListingOption}
+            canAdminister={sessionQuery.data?.can_manage_site === true}
           />
         )}
       </main>
@@ -988,10 +1010,78 @@ function maskDocument(value?: string | null) {
     : `•••.•••.•••-${value.slice(-2)}`;
 }
 
+function ContactPicker({
+  label,
+  contacts,
+  value,
+  onChange,
+}: {
+  label: string;
+  contacts: CRMContact[];
+  value: string;
+  onChange: (contactId: string) => void;
+}) {
+  const selectedName = contacts.find((contact) => contact.id === value)?.name ?? "";
+  const [query, setQuery] = useState(selectedName);
+  const [open, setOpen] = useState(false);
+  const matches = rankContactMatches(contacts, query).slice(0, 25);
+
+  useEffect(() => setQuery(selectedName), [selectedName]);
+
+  const choose = (contact: CRMContact) => {
+    onChange(contact.id);
+    setQuery(contact.name);
+    setOpen(false);
+  };
+
+  return <label className="contact-picker">
+    {label}
+    <input
+      role="combobox"
+      aria-expanded={open}
+      aria-autocomplete="list"
+      autoComplete="off"
+      placeholder="Digite o nome do cliente"
+      value={query}
+      onFocus={() => setOpen(true)}
+      onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+      onChange={(event) => {
+        setQuery(event.target.value);
+        onChange("");
+        setOpen(true);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && open && matches[0]) {
+          event.preventDefault();
+          choose(matches[0]);
+        }
+        if (event.key === "Escape") setOpen(false);
+      }}
+    />
+    {open && <span className="contact-picker-results" role="listbox">
+      {matches.map((contact) => <button
+        type="button"
+        role="option"
+        aria-selected={contact.id === value}
+        key={contact.id}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => choose(contact)}
+      >
+        <b>{contact.name}</b>
+        <small>{[contact.city, contact.phone || contact.email].filter(Boolean).join(" · ") || "Sem dados adicionais"}</small>
+      </button>)}
+      {!matches.length && <small className="contact-picker-empty">Nenhum cliente encontrado.</small>}
+    </span>}
+  </label>;
+}
+
 function CRMPanel({ properties, session, notify }: { properties: Property[]; session: AdminSession; notify: (message: string, failed?: boolean) => void }) {
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<"funnel" | "contacts" | "tasks" | "proposals" | "imports" | "reports" | "notifications" | "team">("funnel");
+  const [tab, setTab] = useState<"funnel" | "available" | "contacts" | "tasks" | "proposals" | "imports" | "reports" | "notifications" | "team">("funnel");
   const [search, setSearch] = useState("");
+  const [poolSearch, setPoolSearch] = useState("");
+  const [debouncedPoolSearch, setDebouncedPoolSearch] = useState("");
+  const [poolPage, setPoolPage] = useState(1);
   const [editingContact, setEditingContact] = useState<CRMContact | null>(null);
   const [showContactForm, setShowContactForm] = useState(false);
   const [contactForm, setContactForm] = useState({ name: "", person_type: "individual", document: "", phone: "", email: "", profile: "general", city: "", state: "", source: "manual", notes: "", assigned_broker: "" });
@@ -1009,11 +1099,27 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
   const reportDefaultTo = new Date().toISOString().slice(0, 10);
   const reportDefaultFrom = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
   const [reportDates, setReportDates] = useState({ date_from: reportDefaultFrom, date_to: reportDefaultTo });
-  const [brokerForm, setBrokerForm] = useState({ name: "", email: "", phone: "", whatsapp: "", role: "broker", username: "", password: "" });
+  const [brokerForm, setBrokerForm] = useState({ name: "", email: "", phone: "", whatsapp: "", role: "broker", username: "", password: "", can_manage_properties: false });
+  const [adminForm, setAdminForm] = useState({ first_name: "", last_name: "", email: "", username: "", password: "" });
+  const [exporting, setExporting] = useState<"xlsx" | "pdf" | null>(null);
 
   const contactsQuery = useQuery({
     queryKey: ["crm-contacts"],
     queryFn: () => collectPages("/admin/crm/contacts/?ordering=name", async (url) => (await api.get<Page<CRMContact>>(url)).data),
+  });
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedPoolSearch(poolSearch);
+      setPoolPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [poolSearch]);
+  const availableContactsQuery = useQuery({
+    queryKey: ["crm-available-contacts", debouncedPoolSearch, poolPage],
+    enabled: !!session.broker_id,
+    queryFn: async () => (await api.get<Page<CRMAvailableContact>>(
+      `/admin/crm/contacts/available/?page=${poolPage}&search=${encodeURIComponent(debouncedPoolSearch)}`,
+    )).data,
   });
   const opportunitiesQuery = useQuery({
     queryKey: ["crm-opportunities"],
@@ -1064,6 +1170,11 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
     enabled: session.can_manage_team,
     queryFn: () => collectPages("/admin/brokers/", async (url) => (await api.get<Page<CRMBroker>>(url)).data),
   });
+  const adminUsersQuery = useQuery({
+    queryKey: ["admin-users"],
+    enabled: session.can_manage_team,
+    queryFn: () => collectPages("/admin/users/", async (url) => (await api.get<Page<AdminUser>>(url)).data),
+  });
   const contacts = contactsQuery.data ?? [];
   const opportunities = opportunitiesQuery.data ?? [];
   const tasks = tasksQuery.data ?? [];
@@ -1083,7 +1194,19 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
       queryClient.invalidateQueries({ queryKey: ["crm-tasks"] }),
       queryClient.invalidateQueries({ queryKey: ["crm-proposals"] }),
       queryClient.invalidateQueries({ queryKey: ["crm-imports"] }),
+      queryClient.invalidateQueries({ queryKey: ["crm-available-contacts"] }),
     ]);
+  };
+  const claimContact = async (contact: CRMAvailableContact) => {
+    try {
+      await api.post(`/admin/crm/contacts/${contact.id}/claim/`);
+      notify(`${contact.name} foi adicionado à sua carteira e ao funil.`);
+      await refreshCRM();
+      setTab("funnel");
+    } catch (error) {
+      notify(friendlyApiError(error), true);
+      await queryClient.invalidateQueries({ queryKey: ["crm-available-contacts"] });
+    }
   };
   const resetContactForm = () => {
     setEditingContact(null);
@@ -1254,7 +1377,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
     if (!brokerForm.name.trim() || !brokerForm.username.trim() || !brokerForm.password) return notify("Informe nome, usuário e senha provisória.", true);
     try {
       await api.post("/admin/brokers/", { ...brokerForm, active: true });
-      setBrokerForm({ name: "", email: "", phone: "", whatsapp: "", role: "broker", username: "", password: "" });
+      setBrokerForm({ name: "", email: "", phone: "", whatsapp: "", role: "broker", username: "", password: "", can_manage_properties: false });
       notify("Corretor e acesso cadastrados.");
       await queryClient.invalidateQueries({ queryKey: ["crm-brokers"] });
     } catch (error) { notify(friendlyApiError(error), true); }
@@ -1265,8 +1388,49 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
       await queryClient.invalidateQueries({ queryKey: ["crm-brokers"] });
     } catch (error) { notify(friendlyApiError(error), true); }
   };
+  const toggleBrokerPropertyAccess = async (broker: CRMBroker) => {
+    try {
+      await api.patch(`/admin/brokers/${broker.id}/`, { can_manage_properties: !broker.can_manage_properties });
+      notify(broker.can_manage_properties ? "Acesso aos imóveis removido." : "Corretor liberado para cadastrar imóveis em rascunho.");
+      await queryClient.invalidateQueries({ queryKey: ["crm-brokers"] });
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const createAdminAccess = async () => {
+    if (!adminForm.first_name.trim() || !adminForm.username.trim() || !adminForm.password) return notify("Informe nome, usuário e senha provisória do administrador.", true);
+    try {
+      await api.post("/admin/users/", { ...adminForm, is_active: true });
+      setAdminForm({ first_name: "", last_name: "", email: "", username: "", password: "" });
+      notify("Novo administrador cadastrado com segurança.");
+      await queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const toggleAdmin = async (adminUser: AdminUser) => {
+    try {
+      await api.patch(`/admin/users/${adminUser.id}/`, { is_active: !adminUser.is_active });
+      notify(adminUser.is_active ? "Acesso administrativo desativado." : "Acesso administrativo reativado.");
+      await queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+    } catch (error) { notify(friendlyApiError(error), true); }
+  };
+  const exportReport = async (format: "xlsx" | "pdf") => {
+    setExporting(format);
+    try {
+      const response = await api.get(`/admin/crm/reports/?date_from=${reportDates.date_from}&date_to=${reportDates.date_to}&export=${format}`, { responseType: "blob" });
+      const disposition = String(response.headers["content-disposition"] || "");
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `relatorio-crm.${format}`;
+      const url = URL.createObjectURL(response.data);
+      const link = document.createElement("a");
+      link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
+      URL.revokeObjectURL(url);
+      notify(`Relatório ${format === "xlsx" ? "Excel" : "PDF"} gerado.`);
+    } catch (error) { notify(friendlyApiError(error), true); }
+    finally { setExporting(null); }
+  };
 
   return <div className="crm-panel">
+    <section className="crm-welcome">
+      <div><small>VISÃO COMERCIAL</small><h2>Seja bem-vindo, {session.display_name || session.broker_name || session.username}.</h2><p>Acompanhe negociações, compromissos e resultados em um só lugar.</p></div>
+      <span className="crm-welcome-date"><CalendarDays /> {new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long" })}</span>
+    </section>
     <div className="metrics crm-metrics">
       <div><span>Contatos</span><strong>{contacts.length}</strong></div>
       <div><span>Oportunidades abertas</span><strong>{opportunities.filter((item) => !["won", "lost"].includes(item.stage)).length}</strong></div>
@@ -1275,6 +1439,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
     </div>
     <div className="crm-tabs" role="tablist">
       <button className={tab === "funnel" ? "active" : ""} onClick={() => setTab("funnel")}><Handshake /> Funil</button>
+      {session.broker_id && <button className={tab === "available" ? "active" : ""} onClick={() => setTab("available")}><UserCheck /> Leads disponíveis</button>}
       <button className={tab === "contacts" ? "active" : ""} onClick={() => setTab("contacts")}><Users /> Contatos</button>
       <button className={tab === "tasks" ? "active" : ""} onClick={() => setTab("tasks")}><CalendarDays /> Agenda</button>
       <button className={tab === "proposals" ? "active" : ""} onClick={() => setTab("proposals")}><BadgeDollarSign /> Propostas</button>
@@ -1284,11 +1449,40 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
       {session.can_manage_team && <button className={tab === "team" ? "active" : ""} onClick={() => setTab("team")}><ShieldCheck /> Equipe e acessos</button>}
     </div>
 
+    {tab === "available" && session.broker_id && <>
+      <section className="admin-card crm-pool-toolbar">
+        <div><h2>Leads disponíveis</h2><p>Contatos ainda sem responsável. Ao assumir, o cliente entra somente na sua carteira e no seu funil.</p></div>
+        <input
+          type="search"
+          value={poolSearch}
+          placeholder="Digite o nome, inclusive outra grafia"
+          onChange={(event) => setPoolSearch(event.target.value)}
+        />
+      </section>
+      <section className="admin-card crm-pool-list">
+        {(availableContactsQuery.data?.results ?? []).map((contact) => <article key={contact.id}>
+          <span className="crm-avatar">{contact.name.slice(0, 1)}</span>
+          <span><b>{contact.name}</b><small>{[contact.city, contact.state, contact.profile].filter(Boolean).join(" · ") || "Contato sem localização informada"}</small></span>
+          <button className="gold-button" onClick={() => claimContact(contact)}><UserCheck /> Assumir atendimento</button>
+        </article>)}
+        {availableContactsQuery.isLoading && <p className="filter-empty">Carregando contatos disponíveis…</p>}
+        {!availableContactsQuery.isLoading && !(availableContactsQuery.data?.results.length) && <p className="filter-empty">Nenhum contato disponível encontrado.</p>}
+        {(availableContactsQuery.data?.previous || availableContactsQuery.data?.next) && <div className="admin-pagination">
+          <span>{availableContactsQuery.data.count} contato(s) disponível(is)</span>
+          <div>
+            <button className="outline" disabled={!availableContactsQuery.data.previous} onClick={() => setPoolPage((page) => Math.max(1, page - 1))}>Anterior</button>
+            <b>Página {poolPage}</b>
+            <button className="outline" disabled={!availableContactsQuery.data.next} onClick={() => setPoolPage((page) => page + 1)}>Próxima</button>
+          </div>
+        </div>}
+      </section>
+    </>}
+
     {tab === "funnel" && <>
       <section className="admin-card crm-create-row">
         <h2>Nova oportunidade</h2>
         <div className="form-grid">
-          <label>Contato<select value={opportunityForm.contact} onChange={(event) => setOpportunityForm({ ...opportunityForm, contact: event.target.value })}><option value="">Selecione</option>{contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name}</option>)}</select></label>
+          <ContactPicker label="Contato" contacts={contacts} value={opportunityForm.contact} onChange={(contact) => setOpportunityForm({ ...opportunityForm, contact })} />
           <label>Imóvel<select value={opportunityForm.property} onChange={(event) => setOpportunityForm({ ...opportunityForm, property: event.target.value })}><option value="">Atendimento geral</option>{crmProperties.filter((property) => property.id).map((property) => <option key={property.id} value={property.id}>{property.title}</option>)}</select></label>
           <label>Título<input value={opportunityForm.title} onChange={(event) => setOpportunityForm({ ...opportunityForm, title: event.target.value })} placeholder="Ex.: Compra no Riviera" /></label>
           <label>Valor esperado<input inputMode="decimal" value={opportunityForm.expected_value} onChange={(event) => setOpportunityForm({ ...opportunityForm, expected_value: normalizeDecimalInput(event.target.value) })} /></label>
@@ -1320,7 +1514,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
       <section className="admin-card"><div className="crm-contact-list">{filteredContacts.map((contact) => <button key={contact.id} onClick={() => editContact(contact)}><span className="crm-avatar">{contact.name.slice(0, 1)}</span><span><b>{contact.name}</b><small>{contact.phone || contact.email || "Sem contato informado"}</small></span><span><i>{contact.profile}</i><small>{contact.property_links.length} imóvel(is) · {contact.opportunity_count} oportunidade(s)</small></span><span><small>{maskDocument(contact.document)}</small><em>Editar</em></span></button>)}</div>{!filteredContacts.length && <p className="filter-empty">Nenhum contato encontrado.</p>}</section>
     </>}
 
-    {tab === "tasks" && <><section className="admin-card crm-create-row"><h2>Nova tarefa ou visita</h2><div className="form-grid"><label>Contato<select value={taskForm.contact} onChange={(event) => setTaskForm({ ...taskForm, contact: event.target.value })}><option value="">Selecione</option>{contacts.map((contact) => <option value={contact.id} key={contact.id}>{contact.name}</option>)}</select></label><label>Oportunidade<select value={taskForm.opportunity} onChange={(event) => setTaskForm({ ...taskForm, opportunity: event.target.value })}><option value="">Sem oportunidade</option>{opportunities.filter((item) => !taskForm.contact || item.contact === taskForm.contact).map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label><label>Tipo<select value={taskForm.kind} onChange={(event) => setTaskForm({ ...taskForm, kind: event.target.value })}><option value="follow_up">Follow-up</option><option value="call">Ligação</option><option value="whatsapp">WhatsApp</option><option value="email">E-mail</option><option value="visit">Visita</option></select></label><label>Tarefa<input value={taskForm.title} onChange={(event) => setTaskForm({ ...taskForm, title: event.target.value })} /></label><label>Data e hora<input type="datetime-local" value={taskForm.due_at} onChange={(event) => setTaskForm({ ...taskForm, due_at: event.target.value })} /></label>{session.can_view_all_crm && <label>Corretor responsável<select value={taskForm.broker} onChange={(event) => setTaskForm({ ...taskForm, broker: event.target.value })}><option value="">Ainda não atribuído</option>{teamReference.map((broker) => <option value={broker.id} key={broker.id}>{broker.name}</option>)}</select></label>}</div><button className="gold-button" onClick={createTask}><Plus /> Criar tarefa</button></section><section className="admin-card crm-task-list">{tasks.map((task) => <article key={task.id} className={task.status}><div><b>{task.title}</b><span>{task.contact_name}{task.property_title ? ` · ${task.property_title}` : ""}</span></div><time>{new Date(task.due_at).toLocaleString("pt-BR")}</time><button className="outline" onClick={() => completeTask(task)}>{task.status === "completed" ? "Reabrir" : "Concluir"}</button></article>)}{!tasks.length && <p className="filter-empty">Nenhuma tarefa cadastrada.</p>}</section></>}
+    {tab === "tasks" && <><section className="admin-card crm-create-row"><h2>Nova tarefa ou visita</h2><div className="form-grid"><ContactPicker label="Contato" contacts={contacts} value={taskForm.contact} onChange={(contact) => setTaskForm({ ...taskForm, contact, opportunity: "" })} /><label>Oportunidade<select value={taskForm.opportunity} onChange={(event) => setTaskForm({ ...taskForm, opportunity: event.target.value })}><option value="">Sem oportunidade</option>{opportunities.filter((item) => !taskForm.contact || item.contact === taskForm.contact).map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label><label>Tipo<select value={taskForm.kind} onChange={(event) => setTaskForm({ ...taskForm, kind: event.target.value })}><option value="follow_up">Follow-up</option><option value="call">Ligação</option><option value="whatsapp">WhatsApp</option><option value="email">E-mail</option><option value="visit">Visita</option></select></label><label>Tarefa<input value={taskForm.title} onChange={(event) => setTaskForm({ ...taskForm, title: event.target.value })} /></label><label>Data e hora<input type="datetime-local" value={taskForm.due_at} onChange={(event) => setTaskForm({ ...taskForm, due_at: event.target.value })} /></label>{session.can_view_all_crm && <label>Corretor responsável<select value={taskForm.broker} onChange={(event) => setTaskForm({ ...taskForm, broker: event.target.value })}><option value="">Ainda não atribuído</option>{teamReference.map((broker) => <option value={broker.id} key={broker.id}>{broker.name}</option>)}</select></label>}</div><button className="gold-button" onClick={createTask}><Plus /> Criar tarefa</button></section><section className="admin-card crm-task-list">{tasks.map((task) => <article key={task.id} className={task.status}><div><b>{task.title}</b><span>{task.contact_name}{task.property_title ? ` · ${task.property_title}` : ""}</span></div><time>{new Date(task.due_at).toLocaleString("pt-BR")}</time><button className="outline" onClick={() => completeTask(task)}>{task.status === "completed" ? "Reabrir" : "Concluir"}</button></article>)}{!tasks.length && <p className="filter-empty">Nenhuma tarefa cadastrada.</p>}</section></>}
 
     {tab === "proposals" && <><section className="admin-card crm-create-row"><h2>Nova proposta</h2><p>Registre as condições sem sobrescrever versões anteriores.</p><div className="form-grid"><label>Oportunidade<select value={proposalForm.opportunity} onChange={(event) => setProposalForm({ ...proposalForm, opportunity: event.target.value })}><option value="">Selecione</option>{opportunities.map((item) => <option value={item.id} key={item.id}>{item.contact_name} — {item.title}</option>)}</select></label><label>Valor total<input inputMode="decimal" value={proposalForm.total_value} onChange={(event) => setProposalForm({ ...proposalForm, total_value: event.target.value })} /></label><label>Entrada/ato<input inputMode="decimal" value={proposalForm.down_payment} onChange={(event) => setProposalForm({ ...proposalForm, down_payment: event.target.value })} /></label><label>Financiamento<input inputMode="decimal" value={proposalForm.financing_value} onChange={(event) => setProposalForm({ ...proposalForm, financing_value: event.target.value })} /></label><label>Nº de parcelas<input type="number" min="0" value={proposalForm.installment_count} onChange={(event) => setProposalForm({ ...proposalForm, installment_count: event.target.value })} /></label><label>Valor da parcela<input inputMode="decimal" value={proposalForm.installment_value} onChange={(event) => setProposalForm({ ...proposalForm, installment_value: event.target.value })} /></label><label>Nº de reforços<input type="number" min="0" value={proposalForm.reinforcement_count} onChange={(event) => setProposalForm({ ...proposalForm, reinforcement_count: event.target.value })} /></label><label>Valor do reforço<input inputMode="decimal" value={proposalForm.reinforcement_value} onChange={(event) => setProposalForm({ ...proposalForm, reinforcement_value: event.target.value })} /></label><label>Bem em dação<input placeholder="Ex.: veículo, terreno, jet" value={proposalForm.exchange_description} onChange={(event) => setProposalForm({ ...proposalForm, exchange_description: event.target.value })} /></label><label>Valor da dação<input inputMode="decimal" value={proposalForm.exchange_value} onChange={(event) => setProposalForm({ ...proposalForm, exchange_value: event.target.value })} /></label><label>Válida até<input type="date" value={proposalForm.valid_until} onChange={(event) => setProposalForm({ ...proposalForm, valid_until: event.target.value })} /></label><label>Observações<textarea value={proposalForm.notes} onChange={(event) => setProposalForm({ ...proposalForm, notes: event.target.value })} /></label></div><button className="gold-button" onClick={createProposal}><BadgeDollarSign /> Criar proposta</button></section><section className="admin-card crm-proposal-list">{(proposalsQuery.data ?? []).map((proposal) => <article key={proposal.id}><span><b>{proposal.contact_name} · versão {proposal.version}</b><small>{proposal.property_title || "Atendimento geral"} · {Number(proposal.total_value).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</small></span><span><small>Entrada: {Number(proposal.down_payment).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</small><small>{proposal.installments[0]?.count || 0} parcela(s) · {proposal.annual_reinforcements[0]?.count || 0} reforço(s)</small></span><select value={proposal.status} onChange={(event) => updateProposalStatus(proposal, event.target.value as CRMProposal["status"])}><option value="draft">Rascunho</option><option value="sent">Enviada</option><option value="analysis">Em análise</option><option value="counter">Contraproposta</option><option value="accepted">Aceita</option><option value="rejected">Recusada</option><option value="expired">Expirada</option></select></article>)}{!(proposalsQuery.data ?? []).length && <p className="filter-empty">Nenhuma proposta registrada.</p>}</section></>}
 
@@ -1335,7 +1529,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
     </>}
 
     {tab === "reports" && <>
-      <section className="admin-card crm-report-filter"><div><h2>Relatórios comerciais</h2><p>{session.can_view_all_crm ? "Visão consolidada da operação e do desempenho da equipe." : "Indicadores da sua carteira comercial."}</p></div><div><label>De<input type="date" value={reportDates.date_from} onChange={(event) => setReportDates({ ...reportDates, date_from: event.target.value })} /></label><label>Até<input type="date" value={reportDates.date_to} onChange={(event) => setReportDates({ ...reportDates, date_to: event.target.value })} /></label></div></section>
+      <section className="admin-card crm-report-filter"><div><h2>Relatórios comerciais</h2><p>{session.can_view_all_crm ? "Visão consolidada da operação e do desempenho da equipe." : "Indicadores da sua carteira comercial."}</p></div><div className="crm-report-controls"><label>De<input type="date" value={reportDates.date_from} onChange={(event) => setReportDates({ ...reportDates, date_from: event.target.value })} /></label><label>Até<input type="date" value={reportDates.date_to} onChange={(event) => setReportDates({ ...reportDates, date_to: event.target.value })} /></label><span className="crm-export-actions"><button className="outline" disabled={!!exporting} onClick={() => exportReport("xlsx")}><FileSpreadsheet /> {exporting === "xlsx" ? "Gerando…" : "Excel"}</button><button className="outline" disabled={!!exporting} onClick={() => exportReport("pdf")}><FileText /> {exporting === "pdf" ? "Gerando…" : "PDF"}</button></span></div></section>
       {reportsQuery.data && <>
         <div className="metrics crm-report-metrics">
           <div><span>Novos contatos</span><strong>{reportsQuery.data.metrics.new_contacts}</strong></div>
@@ -1352,6 +1546,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
           <section className="admin-card"><h2>Origem dos leads</h2><div className="crm-report-ranking">{reportsQuery.data.by_source.map((item) => <article key={item.source}><b>{item.source || "Não informada"}</b><span>{item.total}</span></article>)}{!reportsQuery.data.by_source.length && <p className="filter-empty">Sem oportunidades no período.</p>}</div></section>
         </div>
         <section className="admin-card"><h2>Desempenho por corretor</h2><div className="crm-report-table"><div className="head"><b>Corretor</b><b>Oportunidades</b><b>Fechadas</b><b>Conversão</b><b>Volume</b><b>Atrasos</b></div>{reportsQuery.data.broker_performance.map((item) => <div key={item.broker_id}><span>{item.broker_name}</span><span>{item.opportunities}</span><span>{item.won}</span><span>{item.conversion_rate}%</span><span>{item.won_value.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 })}</span><span>{item.overdue_tasks}</span></div>)}</div></section>
+        <section className="admin-card crm-trend"><header><div><h2>Evolução diária</h2><p>Novas oportunidades e vendas fechadas no período.</p></div><Download /></header><div className="crm-trend-chart">{reportsQuery.data.trend.map((item) => { const maximum = Math.max(1, ...reportsQuery.data.trend.map((day) => Math.max(day.opportunities, day.won))); return <article key={item.date} title={`${new Date(`${item.date}T12:00:00`).toLocaleDateString("pt-BR")}: ${item.opportunities} oportunidades, ${item.won} vendas`}><span style={{ height: `${Math.max(item.opportunities ? 8 : 2, item.opportunities * 100 / maximum)}%` }} /><i style={{ height: `${Math.max(item.won ? 8 : 2, item.won * 100 / maximum)}%` }} /></article>; })}</div><div className="crm-trend-legend"><span><i className="opportunity" /> Oportunidades</span><span><i className="won" /> Vendas fechadas</span></div></section>
         <div className="crm-report-grid"><section className="admin-card"><h2>Atividade do período</h2><div className="crm-report-ranking"><article><b>Visitas concluídas</b><span>{reportsQuery.data.metrics.completed_visits}</span></article><article><b>Propostas movimentadas</b><span>{reportsQuery.data.metrics.sent_proposals}</span></article><article><b>Negócios perdidos</b><span>{reportsQuery.data.metrics.lost}</span></article></div></section><section className="admin-card"><h2>Principais motivos de perda</h2><div className="crm-report-ranking">{reportsQuery.data.loss_reasons.map((item) => <article key={item.loss_reason}><b>{item.loss_reason}</b><span>{item.total}</span></article>)}{!reportsQuery.data.loss_reasons.length && <p className="filter-empty">Nenhum motivo registrado no período.</p>}</div></section></div>
       </>}
     </>}
@@ -1359,8 +1554,10 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
     {tab === "notifications" && <section className="admin-card crm-notifications"><header><div><h2>Central de avisos</h2><p>Atribuições, compromissos próximos e tarefas atrasadas.</p></div>{unreadNotifications > 0 && <button className="outline" onClick={markAllNotificationsRead}>Marcar todas como lidas</button>}</header>{notifications.map((notification) => <button key={notification.id} className={`${notification.priority} ${notification.read_at ? "read" : "unread"}`} onClick={() => markNotificationRead(notification)}><span><i /><b>{notification.title}</b><small>{notification.message}</small></span><time>{new Date(notification.created_at).toLocaleString("pt-BR")}</time></button>)}{!notifications.length && <p className="filter-empty">Nenhum aviso no momento.</p>}</section>}
 
     {tab === "team" && session.can_manage_team && <>
-      <section className="admin-card crm-team-form"><div><h2>Novo acesso comercial</h2><p>Gestores enxergam toda a operação; corretores acessam somente a própria carteira.</p></div><div className="form-grid"><label>Nome<input value={brokerForm.name} onChange={(event) => setBrokerForm({ ...brokerForm, name: event.target.value })} /></label><label>E-mail<input type="email" value={brokerForm.email} onChange={(event) => setBrokerForm({ ...brokerForm, email: event.target.value })} /></label><label>Telefone<input value={brokerForm.phone} onChange={(event) => setBrokerForm({ ...brokerForm, phone: event.target.value })} /></label><label>Perfil<select value={brokerForm.role} onChange={(event) => setBrokerForm({ ...brokerForm, role: event.target.value })}><option value="broker">Corretor — somente sua carteira</option><option value="manager">Gestor — todo o CRM</option></select></label><label>Usuário<input autoComplete="off" value={brokerForm.username} onChange={(event) => setBrokerForm({ ...brokerForm, username: event.target.value })} /></label><label>Senha provisória<input type="password" autoComplete="new-password" value={brokerForm.password} onChange={(event) => setBrokerForm({ ...brokerForm, password: event.target.value })} /></label></div><button className="gold-button" onClick={createBrokerAccess}><UserPlus /> Criar acesso</button></section>
-      <section className="admin-card crm-team-list"><h2>Equipe comercial</h2>{(brokersQuery.data ?? []).map((broker) => <article key={broker.id}><span className="crm-avatar">{broker.name.slice(0, 1)}</span><span><b>{broker.name}</b><small>@{broker.user_username || "sem acesso"} · {broker.role === "manager" ? "Gestor comercial" : "Corretor"}</small></span><i className={broker.active ? "active" : "inactive"}>{broker.active ? "Ativo" : "Inativo"}</i><button className="outline" onClick={() => toggleBroker(broker)}>{broker.active ? "Desativar" : "Ativar"}</button></article>)}</section>
+      <section className="admin-card crm-team-form crm-admin-form"><div><h2>Novo administrador</h2><p>Crie acessos para quem administrará imóveis, conteúdo, CRM e equipe.</p></div><div className="form-grid"><label>Nome<input value={adminForm.first_name} onChange={(event) => setAdminForm({ ...adminForm, first_name: event.target.value })} /></label><label>Sobrenome<input value={adminForm.last_name} onChange={(event) => setAdminForm({ ...adminForm, last_name: event.target.value })} /></label><label>E-mail<input type="email" value={adminForm.email} onChange={(event) => setAdminForm({ ...adminForm, email: event.target.value })} /></label><label>Usuário<input autoComplete="off" value={adminForm.username} onChange={(event) => setAdminForm({ ...adminForm, username: event.target.value })} /></label><label>Senha provisória<input type="password" minLength={8} autoComplete="new-password" value={adminForm.password} onChange={(event) => setAdminForm({ ...adminForm, password: event.target.value })} /></label></div><button className="gold-button" onClick={createAdminAccess}><ShieldCheck /> Criar administrador</button></section>
+      <section className="admin-card crm-team-list crm-admin-list"><h2>Administradores do sistema</h2>{(adminUsersQuery.data ?? []).map((adminUser) => <article key={adminUser.id}><span className="crm-avatar">{adminUser.display_name.slice(0, 1).toUpperCase()}</span><span><b>{adminUser.display_name}</b><small>@{adminUser.username}{adminUser.email ? ` · ${adminUser.email}` : ""}{adminUser.username === session.username ? " · você" : ""}</small></span><i className={adminUser.is_active ? "active" : "inactive"}>{adminUser.is_superuser ? "Superadmin" : adminUser.is_active ? "Ativo" : "Inativo"}</i><button className="outline" disabled={adminUser.username === session.username || (adminUser.is_superuser && session.username !== adminUser.username)} onClick={() => toggleAdmin(adminUser)}>{adminUser.is_active ? "Desativar" : "Ativar"}</button></article>)}</section>
+      <section className="admin-card crm-team-form"><div><h2>Novo acesso comercial</h2><p>Gestores enxergam toda a operação; corretores acessam a própria carteira e podem assumir leads disponíveis.</p></div><div className="form-grid"><label>Nome<input value={brokerForm.name} onChange={(event) => setBrokerForm({ ...brokerForm, name: event.target.value })} /></label><label>E-mail<input type="email" value={brokerForm.email} onChange={(event) => setBrokerForm({ ...brokerForm, email: event.target.value })} /></label><label>Telefone<input value={brokerForm.phone} onChange={(event) => setBrokerForm({ ...brokerForm, phone: event.target.value })} /></label><label>Perfil<select value={brokerForm.role} onChange={(event) => setBrokerForm({ ...brokerForm, role: event.target.value })}><option value="broker">Corretor — somente sua carteira</option><option value="manager">Gestor — todo o CRM</option></select></label><label>Usuário<input autoComplete="off" value={brokerForm.username} onChange={(event) => setBrokerForm({ ...brokerForm, username: event.target.value })} /></label><label>Senha provisória<input type="password" autoComplete="new-password" value={brokerForm.password} onChange={(event) => setBrokerForm({ ...brokerForm, password: event.target.value })} /></label><label className="check admin-check"><input type="checkbox" checked={brokerForm.can_manage_properties} onChange={(event) => setBrokerForm({ ...brokerForm, can_manage_properties: event.target.checked })} /> Pode cadastrar imóveis em rascunho</label></div><button className="gold-button" onClick={createBrokerAccess}><UserPlus /> Criar acesso</button></section>
+      <section className="admin-card crm-team-list"><h2>Equipe comercial</h2>{(brokersQuery.data ?? []).map((broker) => <article key={broker.id}><span className="crm-avatar">{broker.name.slice(0, 1)}</span><span><b>{broker.name}</b><small>@{broker.user_username || "sem acesso"} · {broker.role === "manager" ? "Gestor comercial" : "Corretor"} · {broker.can_manage_properties ? "cadastra imóveis" : "sem acesso aos imóveis"}</small></span><i className={broker.active ? "active" : "inactive"}>{broker.active ? "Ativo" : "Inativo"}</i><span className="crm-team-actions"><button className="outline" onClick={() => toggleBrokerPropertyAccess(broker)}>{broker.can_manage_properties ? "Bloquear imóveis" : "Liberar imóveis"}</button><button className="outline" onClick={() => toggleBroker(broker)}>{broker.active ? "Desativar" : "Ativar"}</button></span></article>)}</section>
     </>}
   </div>;
 }
@@ -1761,6 +1958,7 @@ function Editor({
   createListingOption,
   updateListingOption,
   deleteListingOption,
+  canAdminister,
 }: {
   form: Record<string, string | boolean>;
   setForm: (v: Record<string, string | boolean>) => void;
@@ -1784,6 +1982,7 @@ function Editor({
     input: Pick<ListingOption, "name" | "city">,
   ) => Promise<ListingOption>;
   deleteListingOption: (id: string) => Promise<void>;
+  canAdminister: boolean;
 }) {
   const [saleConfirmation, setSaleConfirmation] = useState<"sell" | "restore" | null>(null);
   const [archiveConfirmation, setArchiveConfirmation] = useState<"archive" | "restore" | null>(null);
@@ -1857,7 +2056,7 @@ function Editor({
             ))}
           </select>
         </label>
-        <button
+        {canAdminister && <button
           type="button"
           className="catalog-edit"
           disabled={disabled || !selectedOption}
@@ -1871,8 +2070,8 @@ function Editor({
           }}
         >
           <Pencil />
-        </button>
-        <button
+        </button>}
+        {canAdminister && <button
           type="button"
           className="catalog-delete-trigger"
           disabled={disabled || !selectedOption}
@@ -1886,8 +2085,8 @@ function Editor({
           }}
         >
           <Trash2 />
-        </button>
-        <button
+        </button>}
+        {canAdminister && <button
           type="button"
           className="catalog-add"
           disabled={disabled}
@@ -1900,7 +2099,7 @@ function Editor({
           }}
         >
           <Plus />
-        </button>
+        </button>}
       </div>
     );
   };
@@ -1909,6 +2108,16 @@ function Editor({
       <button className="back" onClick={back}>
         <ArrowLeft /> Voltar
       </button>
+      {selected.source === "whatsapp" && (
+        <div className="whatsapp-ingest-banner" role="status">
+          <MessageCircle />
+          <span>
+            <b>Recebido automaticamente do WhatsApp</b>
+            Rascunho aguardando conferência. Revise os dados, contatos privados e
+            mídias antes de publicar.
+          </span>
+        </div>
+      )}
       {!selected.id && (
         <label className="txt-import">
           <Upload />
@@ -1985,7 +2194,7 @@ function Editor({
         <button className="gold-button" onClick={save} disabled={saving}>
           <Save /> Salvar imóvel
         </button>
-        {selected.id && (
+        {canAdminister && selected.id && (
           <>
             <button
               className="outline"
@@ -2364,4 +2573,3 @@ function Editor({
     </section>
   );
 }
-

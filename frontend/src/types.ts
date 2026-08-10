@@ -47,6 +47,8 @@ export type Property = {
   private_address?: string;
   private_commission?: string;
   internal_notes?: string;
+  source?: string;
+  external_id?: string;
   reviewed_at?: string | null;
   created_at?: string;
 };
@@ -198,12 +200,29 @@ export type CRMImportRow = {
 };
 export type AdminSession = {
   username: string;
+  display_name: string;
+  first_name: string;
+  last_name: string;
+  email: string;
   role: "admin" | "manager" | "broker";
   broker_id?: string | null;
   broker_name: string;
   can_view_all_crm: boolean;
+  can_manage_properties: boolean;
   can_manage_site: boolean;
   can_manage_team: boolean;
+};
+export type AdminUser = {
+  id: number;
+  username: string;
+  first_name: string;
+  last_name: string;
+  display_name: string;
+  email: string;
+  is_active: boolean;
+  is_superuser: boolean;
+  date_joined: string;
+  last_login?: string | null;
 };
 export type CRMNotification = {
   id: string;
@@ -222,8 +241,18 @@ export type CRMBroker = {
   email: string;
   whatsapp: string;
   role: "manager" | "broker";
+  can_manage_properties: boolean;
   active: boolean;
   user_username?: string;
+};
+export type CRMAvailableContact = {
+  id: string;
+  name: string;
+  city: string;
+  state: string;
+  profile: CRMContact["profile"];
+  source: string;
+  created_at: string;
 };
 export type CRMReport = {
   period: { date_from: string; date_to: string };
