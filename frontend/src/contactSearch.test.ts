@@ -6,6 +6,7 @@ const contacts = [
   { id: "2", name: "Iury Costa" },
   { id: "3", name: "Karlos Pereira" },
   { id: "4", name: "Maria Flor" },
+  { id: "5", name: "Beatriz Almeida" },
 ];
 
 describe("contact search", () => {
@@ -20,5 +21,6 @@ describe("contact search", () => {
     expect(rankContactMatches(contacts, "iuri").map((item) => item.id)).toEqual(["2", "1"]);
     expect(rankContactMatches(contacts, "carlos").map((item) => item.id)).toEqual(["3"]);
     expect(rankContactMatches(contacts, "mariaa").map((item) => item.id)).toEqual(["4"]);
+    expect(rankContactMatches(contacts, "biatriz").map((item) => item.id)).toEqual(["5"]);
   });
 });

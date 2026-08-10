@@ -41,9 +41,8 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "./api";
-import { rankContactMatches } from "./contactSearch";
 import { collectPages, paginateItems } from "./pagination";
-import type { AdminSession, AdminUser, CRMActivity, CRMAvailableContact, CRMBroker, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMReport, CRMTask, FAQ, HeroSlide, InstitutionalImage, Lead, ListingOption, Page, Property, PublicContent, SiteSettings, Testimonial } from "./types";
+import type { AdminSession, AdminUser, CRMActivity, CRMAvailableContact, CRMBroker, CRMContact, CRMContactChoice, CRMContactHolder, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMReport, CRMSummary, CRMTask, FAQ, HeroSlide, InstitutionalImage, Lead, ListingOption, Page, Property, PublicContent, SiteSettings, Testimonial } from "./types";
 
 const reviewLabels: Record<string, string> = {
   green: "Novo",
@@ -1012,23 +1011,36 @@ function maskDocument(value?: string | null) {
 
 function ContactPicker({
   label,
-  contacts,
   value,
   onChange,
 }: {
   label: string;
-  contacts: CRMContact[];
+  contacts?: CRMContact[];
   value: string;
   onChange: (contactId: string) => void;
 }) {
-  const selectedName = contacts.find((contact) => contact.id === value)?.name ?? "";
-  const [query, setQuery] = useState(selectedName);
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [open, setOpen] = useState(false);
-  const matches = rankContactMatches(contacts, query).slice(0, 25);
+  const matchesQuery = useQuery({
+    queryKey: ["crm-contact-choices", debouncedQuery],
+    enabled: open,
+    staleTime: 30_000,
+    queryFn: async () => (await api.get<Page<CRMContactChoice>>(
+      `/admin/crm/contacts/choices/?search=${encodeURIComponent(debouncedQuery)}`,
+    )).data,
+  });
+  const matches = matchesQuery.data?.results ?? [];
 
-  useEffect(() => setQuery(selectedName), [selectedName]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query), 200);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+  useEffect(() => {
+    if (!value) setQuery("");
+  }, [value]);
 
-  const choose = (contact: CRMContact) => {
+  const choose = (contact: CRMContactChoice) => {
     onChange(contact.id);
     setQuery(contact.name);
     setOpen(false);
@@ -1070,7 +1082,8 @@ function ContactPicker({
         <b>{contact.name}</b>
         <small>{[contact.city, contact.phone || contact.email].filter(Boolean).join(" · ") || "Sem dados adicionais"}</small>
       </button>)}
-      {!matches.length && <small className="contact-picker-empty">Nenhum cliente encontrado.</small>}
+      {matchesQuery.isFetching && <small className="contact-picker-empty">Buscando clientes...</small>}
+      {!matchesQuery.isFetching && !matches.length && <small className="contact-picker-empty">Nenhum cliente encontrado.</small>}
     </span>}
   </label>;
 }
@@ -1079,6 +1092,8 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<"funnel" | "available" | "contacts" | "tasks" | "proposals" | "imports" | "reports" | "notifications" | "team">("funnel");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [contactPage, setContactPage] = useState(1);
   const [poolSearch, setPoolSearch] = useState("");
   const [debouncedPoolSearch, setDebouncedPoolSearch] = useState("");
   const [poolPage, setPoolPage] = useState(1);
@@ -1103,9 +1118,26 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
   const [adminForm, setAdminForm] = useState({ first_name: "", last_name: "", email: "", username: "", password: "" });
   const [exporting, setExporting] = useState<"xlsx" | "pdf" | null>(null);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search);
+      setContactPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
   const contactsQuery = useQuery({
-    queryKey: ["crm-contacts"],
-    queryFn: () => collectPages("/admin/crm/contacts/?ordering=name", async (url) => (await api.get<Page<CRMContact>>(url)).data),
+    queryKey: ["crm-contacts", debouncedSearch, contactPage],
+    enabled: tab === "contacts",
+    placeholderData: (previous) => previous,
+    refetchInterval: tab === "contacts" ? 15_000 : false,
+    queryFn: async () => (await api.get<Page<CRMContact>>(
+      `/admin/crm/contacts/?ordering=name&page=${contactPage}&search=${encodeURIComponent(debouncedSearch)}`,
+    )).data,
+  });
+  const summaryQuery = useQuery({
+    queryKey: ["crm-summary"],
+    refetchInterval: 10_000,
+    queryFn: async () => (await api.get<CRMSummary>("/admin/crm/contacts/summary/")).data,
   });
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1117,26 +1149,37 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
   const availableContactsQuery = useQuery({
     queryKey: ["crm-available-contacts", debouncedPoolSearch, poolPage],
     enabled: !!session.broker_id,
+    refetchInterval: tab === "available" ? 10_000 : false,
     queryFn: async () => (await api.get<Page<CRMAvailableContact>>(
       `/admin/crm/contacts/available/?page=${poolPage}&search=${encodeURIComponent(debouncedPoolSearch)}`,
     )).data,
   });
   const opportunitiesQuery = useQuery({
     queryKey: ["crm-opportunities"],
+    enabled: tab === "funnel" || tab === "tasks" || tab === "proposals",
     queryFn: () => collectPages("/admin/crm/opportunities/", async (url) => (await api.get<Page<CRMOpportunity>>(url)).data),
   });
   const tasksQuery = useQuery({
     queryKey: ["crm-tasks"],
+    enabled: tab === "tasks",
     queryFn: () => collectPages("/admin/crm/tasks/?ordering=due_at", async (url) => (await api.get<Page<CRMTask>>(url)).data),
   });
   const proposalsQuery = useQuery({
     queryKey: ["crm-proposals"],
+    enabled: tab === "proposals",
     queryFn: () => collectPages("/admin/crm/proposals/", async (url) => (await api.get<Page<CRMProposal>>(url)).data),
   });
   const activitiesQuery = useQuery({
     queryKey: ["crm-activities", editingContact?.id],
     enabled: !!editingContact,
     queryFn: () => collectPages(`/admin/crm/activities/?contact=${editingContact?.id}`, async (url) => (await api.get<Page<CRMActivity>>(url)).data),
+  });
+  const contactHoldersQuery = useQuery({
+    queryKey: ["crm-contact-holders", editingContact?.id],
+    enabled: session.can_manage_team && !!editingContact,
+    queryFn: async () => (await api.get<CRMContactHolder[]>(
+      `/admin/crm/contacts/${editingContact?.id}/holders/`,
+    )).data,
   });
   const importsQuery = useQuery({
     queryKey: ["crm-imports"],
@@ -1158,6 +1201,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
   });
   const reportsQuery = useQuery({
     queryKey: ["crm-reports", reportDates],
+    enabled: tab === "reports",
     queryFn: async () => (await api.get<CRMReport>(`/admin/crm/reports/?date_from=${reportDates.date_from}&date_to=${reportDates.date_to}`)).data,
   });
   const notificationsQuery = useQuery({
@@ -1175,7 +1219,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
     enabled: session.can_manage_team,
     queryFn: () => collectPages("/admin/users/", async (url) => (await api.get<Page<AdminUser>>(url)).data),
   });
-  const contacts = contactsQuery.data ?? [];
+  const contacts = contactsQuery.data?.results ?? [];
   const opportunities = opportunitiesQuery.data ?? [];
   const tasks = tasksQuery.data ?? [];
   const crmProperties = referencePropertiesQuery.data ?? properties;
@@ -1183,13 +1227,13 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
   const notifications = notificationsQuery.data ?? [];
   const unreadNotifications = notifications.filter((item) => !item.read_at).length;
   const selectedBatch = (importsQuery.data ?? []).find((batch) => batch.id === currentBatch);
-  const filteredContacts = contacts.filter((contact) =>
-    [contact.name, contact.email, contact.phone, contact.city].some((value) => value?.toLocaleLowerCase("pt-BR").includes(search.toLocaleLowerCase("pt-BR"))),
-  );
+  const filteredContacts = contacts;
 
   const refreshCRM = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["crm-contacts"] }),
+      queryClient.invalidateQueries({ queryKey: ["crm-summary"] }),
+      queryClient.invalidateQueries({ queryKey: ["crm-contact-choices"] }),
       queryClient.invalidateQueries({ queryKey: ["crm-opportunities"] }),
       queryClient.invalidateQueries({ queryKey: ["crm-tasks"] }),
       queryClient.invalidateQueries({ queryKey: ["crm-proposals"] }),
@@ -1231,6 +1275,16 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
       name: contact.name, person_type: contact.person_type, document: contact.document ?? "", phone: contact.phone,
       email: contact.email, profile: contact.profile, city: contact.city, state: contact.state, source: contact.source, notes: contact.notes, assigned_broker: contact.assigned_broker ?? "",
     });
+  };
+  const releaseContact = async (holder: CRMContactHolder) => {
+    if (!editingContact) return;
+    if (!window.confirm(`Remover ${editingContact.name} da carteira de ${holder.name}${holder.username ? ` (${holder.username})` : ""}? O contato voltará para Leads disponíveis quando não houver outro atendimento aberto.`)) return;
+    try {
+      const response = await api.post<{ detail: string }>(`/admin/crm/contacts/${editingContact.id}/release/`, { broker: holder.id });
+      notify(response.data.detail);
+      resetContactForm();
+      await refreshCRM();
+    } catch (error) { notify(friendlyApiError(error), true); }
   };
   const createPropertyLink = async () => {
     if (!editingContact || (!linkForm.property && !linkForm.unit_reference.trim())) return notify("Escolha um imóvel ou informe a unidade.", true);
@@ -1432,10 +1486,10 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
       <span className="crm-welcome-date"><CalendarDays /> {new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long" })}</span>
     </section>
     <div className="metrics crm-metrics">
-      <div><span>Contatos</span><strong>{contacts.length}</strong></div>
-      <div><span>Oportunidades abertas</span><strong>{opportunities.filter((item) => !["won", "lost"].includes(item.stage)).length}</strong></div>
-      <div><span>Follow-ups pendentes</span><strong>{tasks.filter((task) => task.status === "pending").length}</strong></div>
-      <div><span>Negócios fechados</span><strong>{opportunities.filter((item) => item.stage === "won").length}</strong></div>
+      <div><span>Contatos</span><strong>{summaryQuery.data?.contacts ?? "—"}</strong></div>
+      <div><span>Oportunidades abertas</span><strong>{summaryQuery.data?.open_opportunities ?? "—"}</strong></div>
+      <div><span>Follow-ups pendentes</span><strong>{summaryQuery.data?.pending_follow_ups ?? "—"}</strong></div>
+      <div><span>Negócios fechados</span><strong>{summaryQuery.data?.won_opportunities ?? "—"}</strong></div>
     </div>
     <div className="crm-tabs" role="tablist">
       <button className={tab === "funnel" ? "active" : ""} onClick={() => setTab("funnel")}><Handshake /> Funil</button>
@@ -1482,7 +1536,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
       <section className="admin-card crm-create-row">
         <h2>Nova oportunidade</h2>
         <div className="form-grid">
-          <ContactPicker label="Contato" contacts={contacts} value={opportunityForm.contact} onChange={(contact) => setOpportunityForm({ ...opportunityForm, contact })} />
+          <ContactPicker label="Contato" value={opportunityForm.contact} onChange={(contact) => setOpportunityForm({ ...opportunityForm, contact })} />
           <label>Imóvel<select value={opportunityForm.property} onChange={(event) => setOpportunityForm({ ...opportunityForm, property: event.target.value })}><option value="">Atendimento geral</option>{crmProperties.filter((property) => property.id).map((property) => <option key={property.id} value={property.id}>{property.title}</option>)}</select></label>
           <label>Título<input value={opportunityForm.title} onChange={(event) => setOpportunityForm({ ...opportunityForm, title: event.target.value })} placeholder="Ex.: Compra no Riviera" /></label>
           <label>Valor esperado<input inputMode="decimal" value={opportunityForm.expected_value} onChange={(event) => setOpportunityForm({ ...opportunityForm, expected_value: normalizeDecimalInput(event.target.value) })} /></label>
@@ -1508,10 +1562,10 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
         <label>Origem<input value={contactForm.source} onChange={(event) => setContactForm({ ...contactForm, source: event.target.value })} /></label>
         {session.can_view_all_crm && <label>Corretor responsável<select value={contactForm.assigned_broker} onChange={(event) => setContactForm({ ...contactForm, assigned_broker: event.target.value })}><option value="">Sem responsável</option>{teamReference.map((broker) => <option value={broker.id} key={broker.id}>{broker.name}</option>)}</select></label>}
         <label className="crm-notes">Observações<textarea rows={4} value={contactForm.notes} onChange={(event) => setContactForm({ ...contactForm, notes: event.target.value })} /></label>
-      </div><button className="gold-button" onClick={saveContact}><Save /> Salvar contato</button>
+      </div><span className="crm-row-actions"><button className="gold-button" onClick={saveContact}><Save /> Salvar contato</button>{session.can_manage_team && (contactHoldersQuery.data ?? []).map((holder) => <button key={holder.id} className="outline" onClick={() => releaseContact(holder)}><X /> Remover de {holder.name}{holder.username ? ` (${holder.username})` : ""}</button>)}</span>
       {editingContact && <><div className="crm-link-editor"><h3>Vincular proprietário e imóvel</h3><div className="form-grid"><label>Imóvel cadastrado<select value={linkForm.property} onChange={(event) => setLinkForm({ ...linkForm, property: event.target.value })}><option value="">Unidade externa</option>{crmProperties.filter((property) => property.id).map((property) => <option key={property.id} value={property.id}>{property.title}</option>)}</select></label><label>Empreendimento<input value={linkForm.development_name} onChange={(event) => setLinkForm({ ...linkForm, development_name: event.target.value })} /></label><label>Unidade/lote<input value={linkForm.unit_reference} onChange={(event) => setLinkForm({ ...linkForm, unit_reference: event.target.value })} /></label><label>Relação<select value={linkForm.relationship} onChange={(event) => setLinkForm({ ...linkForm, relationship: event.target.value })}><option value="owner">Proprietário</option><option value="co_owner">Coproprietário</option><option value="interested">Interessado</option><option value="representative">Representante</option></select></label></div><button className="outline" onClick={createPropertyLink}><Building2 /> Registrar vínculo</button><div className="crm-links">{editingContact.property_links.map((link) => <span key={link.id}>{link.property_title || `${link.development_name} ${link.unit_reference}`}</span>)}</div></div><div className="crm-timeline"><h3>Histórico de atendimento</h3><div className="crm-note-form"><textarea rows={3} placeholder="Registrar ligação, conversa ou observação" value={activityNote} onChange={(event) => setActivityNote(event.target.value)} /><button className="outline" onClick={addActivity}><Plus /> Adicionar</button></div>{(activitiesQuery.data ?? []).map((activity) => <article key={activity.id}><i /><span><b>{activity.kind}</b><p>{activity.description}</p><small>{new Date(activity.created_at).toLocaleString("pt-BR")}{activity.actor_name ? ` · ${activity.actor_name}` : ""}</small></span></article>)}</div></>}
       </section>}
-      <section className="admin-card"><div className="crm-contact-list">{filteredContacts.map((contact) => <button key={contact.id} onClick={() => editContact(contact)}><span className="crm-avatar">{contact.name.slice(0, 1)}</span><span><b>{contact.name}</b><small>{contact.phone || contact.email || "Sem contato informado"}</small></span><span><i>{contact.profile}</i><small>{contact.property_links.length} imóvel(is) · {contact.opportunity_count} oportunidade(s)</small></span><span><small>{maskDocument(contact.document)}</small><em>Editar</em></span></button>)}</div>{!filteredContacts.length && <p className="filter-empty">Nenhum contato encontrado.</p>}</section>
+      <section className="admin-card"><div className="crm-contact-list">{filteredContacts.map((contact) => <button key={contact.id} onClick={() => editContact(contact)}><span className="crm-avatar">{contact.name.slice(0, 1)}</span><span><b>{contact.name}</b><small>{contact.phone || contact.email || "Sem contato informado"}</small></span><span><i>{contact.profile}</i><small>{contact.property_links.length} imóvel(is) · {contact.opportunity_count} oportunidade(s)</small></span><span><small>{maskDocument(contact.document)}</small><em>Editar</em></span></button>)}</div>{contactsQuery.isFetching && <p className="filter-empty">Buscando contatos...</p>}{!contactsQuery.isFetching && !filteredContacts.length && <p className="filter-empty">Nenhum contato encontrado.</p>}{contactsQuery.data && (contactsQuery.data.previous || contactsQuery.data.next) && <div className="admin-pagination"><span>{contactsQuery.data.count} contato(s)</span><div><button className="outline" disabled={!contactsQuery.data.previous} onClick={() => setContactPage((page) => Math.max(1, page - 1))}>Anterior</button><b>Página {contactPage}</b><button className="outline" disabled={!contactsQuery.data.next} onClick={() => setContactPage((page) => page + 1)}>Próxima</button></div></div>}</section>
     </>}
 
     {tab === "tasks" && <><section className="admin-card crm-create-row"><h2>Nova tarefa ou visita</h2><div className="form-grid"><ContactPicker label="Contato" contacts={contacts} value={taskForm.contact} onChange={(contact) => setTaskForm({ ...taskForm, contact, opportunity: "" })} /><label>Oportunidade<select value={taskForm.opportunity} onChange={(event) => setTaskForm({ ...taskForm, opportunity: event.target.value })}><option value="">Sem oportunidade</option>{opportunities.filter((item) => !taskForm.contact || item.contact === taskForm.contact).map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label><label>Tipo<select value={taskForm.kind} onChange={(event) => setTaskForm({ ...taskForm, kind: event.target.value })}><option value="follow_up">Follow-up</option><option value="call">Ligação</option><option value="whatsapp">WhatsApp</option><option value="email">E-mail</option><option value="visit">Visita</option></select></label><label>Tarefa<input value={taskForm.title} onChange={(event) => setTaskForm({ ...taskForm, title: event.target.value })} /></label><label>Data e hora<input type="datetime-local" value={taskForm.due_at} onChange={(event) => setTaskForm({ ...taskForm, due_at: event.target.value })} /></label>{session.can_view_all_crm && <label>Corretor responsável<select value={taskForm.broker} onChange={(event) => setTaskForm({ ...taskForm, broker: event.target.value })}><option value="">Ainda não atribuído</option>{teamReference.map((broker) => <option value={broker.id} key={broker.id}>{broker.name}</option>)}</select></label>}</div><button className="gold-button" onClick={createTask}><Plus /> Criar tarefa</button></section><section className="admin-card crm-task-list">{tasks.map((task) => <article key={task.id} className={task.status}><div><b>{task.title}</b><span>{task.contact_name}{task.property_title ? ` · ${task.property_title}` : ""}</span></div><time>{new Date(task.due_at).toLocaleString("pt-BR")}</time><button className="outline" onClick={() => completeTask(task)}>{task.status === "completed" ? "Reabrir" : "Concluir"}</button></article>)}{!tasks.length && <p className="filter-empty">Nenhuma tarefa cadastrada.</p>}</section></>}

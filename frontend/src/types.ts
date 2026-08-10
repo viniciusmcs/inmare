@@ -254,6 +254,24 @@ export type CRMAvailableContact = {
   source: string;
   created_at: string;
 };
+export type CRMContactChoice = {
+  id: string;
+  name: string;
+  phone: string;
+  email: string;
+  city: string;
+};
+export type CRMContactHolder = {
+  id: string;
+  name: string;
+  username: string;
+};
+export type CRMSummary = {
+  contacts: number;
+  open_opportunities: number;
+  pending_follow_ups: number;
+  won_opportunities: number;
+};
 export type CRMReport = {
   period: { date_from: string; date_to: string };
   metrics: {

@@ -19,7 +19,9 @@ from django.utils.text import slugify
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
@@ -32,7 +34,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from .models import AuditEvent, Broker, CRMActivity, CRMContact, CRMImportBatch, CRMImportRow, CRMNotification, CRMOpportunity, CRMProposal, CRMPropertyLink, CRMTask, Development, FrequentlyAskedQuestion, HeroSlide, ImportJob, InstitutionalImage, Lead, ListingOption, Media, Property, SiteSettings, Testimonial, catalog_key, person_name_search_key
-from .serializers import AdminLeadSerializer, AdminUserSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, CRMActivitySerializer, CRMContactPoolSerializer, CRMContactSerializer, CRMImportBatchSerializer, CRMImportRowSerializer, CRMNotificationSerializer, CRMOpportunitySerializer, CRMProposalSerializer, CRMPropertyLinkSerializer, CRMTaskSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, ListingOptionSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
+from .serializers import AdminLeadSerializer, AdminUserSerializer, AuditSerializer, AdminPropertySerializer, BrokerSerializer, CRMActivitySerializer, CRMContactChoiceSerializer, CRMContactPoolSerializer, CRMContactSerializer, CRMImportBatchSerializer, CRMImportRowSerializer, CRMNotificationSerializer, CRMOpportunitySerializer, CRMProposalSerializer, CRMPropertyLinkSerializer, CRMTaskSerializer, DevelopmentSerializer, FrequentlyAskedQuestionSerializer, HeroSlideSerializer, ImportJobSerializer, InstitutionalImageSerializer, LeadSerializer, ListingOptionSerializer, PublicPropertySerializer, SiteSettingsSerializer, TestimonialSerializer
 from .services import extract_property_description, import_property_folder, import_property_zip
 from .crm_services import commit_import_batch, file_sha256, find_duplicate_contact, find_duplicate_import_row, process_import_batch, sanitize_import_row, validate_crm_import
 from .crm_permissions import CanManageProperties, IsCRMManager, IsCRMUser, can_view_all_crm, crm_user_payload, user_broker
@@ -44,6 +46,12 @@ class PublicPropertyPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = "page_size"
     max_page_size = 20
+
+
+class CRMContactPagination(PageNumberPagination):
+    page_size = 30
+    page_size_query_param = "page_size"
+    max_page_size = 50
 
 class HealthView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -885,14 +893,99 @@ class AdminLeadViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAdminUser]; serializer_class = AdminLeadSerializer; queryset = Lead.objects.all().select_related("property", "development", "broker")
 
 
-def crm_contacts_for(user):
-    queryset = CRMContact.objects.all()
-    if can_view_all_crm(user):
-        return queryset
-    broker = user_broker(user)
-    return queryset.filter(
-        Q(assigned_broker=broker) | Q(opportunities__broker=broker) | Q(tasks__broker=broker)
+def crm_contacts_owned_by(broker):
+    return CRMContact.objects.filter(
+        Q(assigned_broker=broker)
+        | Q(
+            opportunities__broker=broker,
+            opportunities__stage__in=[
+                CRMOpportunity.Stage.NEW,
+                CRMOpportunity.Stage.CONTACTED,
+                CRMOpportunity.Stage.VISIT,
+                CRMOpportunity.Stage.PROPOSAL,
+                CRMOpportunity.Stage.NEGOTIATION,
+                CRMOpportunity.Stage.PAUSED,
+            ],
+        )
+        | Q(tasks__broker=broker, tasks__status=CRMTask.Status.PENDING)
     ).distinct()
+
+
+def crm_contacts_for(user):
+    if can_view_all_crm(user):
+        return CRMContact.objects.all()
+    return crm_contacts_owned_by(user_broker(user))
+
+
+def _edit_distance(first, second):
+    previous = list(range(len(second) + 1))
+    for first_index, first_character in enumerate(first, start=1):
+        diagonal = previous[0]
+        previous[0] = first_index
+        for second_index, second_character in enumerate(second, start=1):
+            above = previous[second_index]
+            previous[second_index] = min(
+                previous[second_index] + 1,
+                previous[second_index - 1] + 1,
+                diagonal + (first_character != second_character),
+            )
+            diagonal = above
+    return previous[-1]
+
+
+def _fuzzy_name_match(search_name, query):
+    if query in search_name:
+        return True
+    name_tokens = search_name.split()
+    for query_token in query.split():
+        tolerance = 2 if len(query_token) >= 7 else 1 if len(query_token) >= 4 else 0
+        if not any(_edit_distance(query_token, name_token) <= tolerance for name_token in name_tokens):
+            return False
+    return True
+
+
+def filter_contacts_by_search(queryset, raw_search):
+    raw_search = (raw_search or "").strip()[:80]
+    if not raw_search:
+        return queryset
+    normalized_search = person_name_search_key(raw_search)
+    direct_filter = (
+        Q(name__icontains=raw_search)
+        | Q(document__icontains=raw_search)
+        | Q(phone__icontains=raw_search)
+        | Q(email__icontains=raw_search)
+        | Q(city__icontains=raw_search)
+    )
+    fuzzy_ids = []
+    if normalized_search:
+        direct_filter |= Q(search_name__contains=normalized_search)
+        fuzzy_ids = [
+            contact_id
+            for contact_id, search_name in queryset.order_by().values_list("id", "search_name")
+            if _fuzzy_name_match(search_name, normalized_search)
+        ]
+    return queryset.filter(direct_filter | Q(id__in=fuzzy_ids))
+
+
+def contact_holder_brokers(contact):
+    return Broker.objects.filter(
+        Q(crm_contacts=contact)
+        | Q(
+            crm_opportunities__contact=contact,
+            crm_opportunities__stage__in=[
+                CRMOpportunity.Stage.NEW,
+                CRMOpportunity.Stage.CONTACTED,
+                CRMOpportunity.Stage.VISIT,
+                CRMOpportunity.Stage.PROPOSAL,
+                CRMOpportunity.Stage.NEGOTIATION,
+                CRMOpportunity.Stage.PAUSED,
+            ],
+        )
+        | Q(
+            crm_tasks__contact=contact,
+            crm_tasks__status=CRMTask.Status.PENDING,
+        )
+    ).distinct().order_by("name", "id")
 
 
 def crm_opportunities_for(user):
@@ -991,6 +1084,8 @@ class CRMAuditMixin:
 class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
     permission_classes = [IsCRMUser]
     serializer_class = CRMContactSerializer
+    pagination_class = CRMContactPagination
+    filter_backends = (DjangoFilterBackend, OrderingFilter)
     audit_entity = "CRMContact"
     broker_assignment_field = "assigned_broker"
     filterset_fields = ("status", "profile", "person_type", "assigned_broker", "source")
@@ -998,12 +1093,58 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
     ordering_fields = ("name", "created_at", "updated_at", "last_contact_at")
 
     def get_queryset(self):
-        return crm_contacts_for(self.request.user).select_related("assigned_broker").prefetch_related(
+        queryset = crm_contacts_for(self.request.user).select_related("assigned_broker").prefetch_related(
             "property_links__property"
         ).annotate(
             opportunity_count=Count("opportunities", distinct=True),
             pending_task_count=Count("tasks", filter=Q(tasks__status=CRMTask.Status.PENDING), distinct=True),
         ).order_by("name", "created_at")
+        return filter_contacts_by_search(queryset, self.request.query_params.get("search"))
+
+    def perform_update(self, serializer):
+        old_broker = serializer.instance.assigned_broker
+        broker_changed = "assigned_broker" in serializer.validated_data
+        new_broker = serializer.validated_data.get("assigned_broker", old_broker)
+        with transaction.atomic():
+            super().perform_update(serializer)
+            if broker_changed and old_broker != new_broker:
+                active_opportunities = serializer.instance.opportunities.exclude(
+                    stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST],
+                )
+                pending_tasks = serializer.instance.tasks.filter(status=CRMTask.Status.PENDING)
+                if old_broker:
+                    active_opportunities = active_opportunities.filter(broker=old_broker)
+                    pending_tasks = pending_tasks.filter(broker=old_broker)
+                else:
+                    active_opportunities = active_opportunities.filter(broker__isnull=True)
+                    pending_tasks = pending_tasks.filter(broker__isnull=True)
+                active_opportunities.update(broker=new_broker)
+                pending_tasks.update(broker=new_broker)
+
+    @action(detail=False, methods=["get"], url_path="summary")
+    def summary(self, request):
+        return Response({
+            "contacts": crm_contacts_for(request.user).count(),
+            "open_opportunities": crm_opportunities_for(request.user).exclude(
+                stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST],
+            ).count(),
+            "pending_follow_ups": crm_tasks_for(request.user).filter(
+                status=CRMTask.Status.PENDING,
+            ).count(),
+            "won_opportunities": crm_opportunities_for(request.user).filter(
+                stage=CRMOpportunity.Stage.WON,
+            ).count(),
+        })
+
+    @action(detail=False, methods=["get"], url_path="choices")
+    def choices(self, request):
+        queryset = filter_contacts_by_search(
+            crm_contacts_for(request.user).order_by("name", "created_at"),
+            request.query_params.get("search"),
+        )
+        page = self.paginate_queryset(queryset)
+        serializer = CRMContactChoiceSerializer(page if page is not None else queryset, many=True)
+        return self.get_paginated_response(serializer.data) if page is not None else Response(serializer.data)
 
     @action(detail=False, methods=["get"], url_path="available")
     def available(self, request):
@@ -1011,13 +1152,16 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
             assigned_broker__isnull=True,
             status=CRMContact.Status.ACTIVE,
         ).exclude(
-            opportunities__broker__isnull=False,
+            opportunities__in=CRMOpportunity.objects.exclude(
+                broker__isnull=True,
+            ).exclude(stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST]),
         ).exclude(
-            tasks__broker__isnull=False,
+            tasks__in=CRMTask.objects.filter(
+                broker__isnull=False,
+                status=CRMTask.Status.PENDING,
+            ),
         ).distinct().order_by("name", "created_at")
-        search = person_name_search_key(request.query_params.get("search", ""))
-        if search:
-            queryset = queryset.filter(search_name__contains=search)
+        queryset = filter_contacts_by_search(queryset, request.query_params.get("search"))
         page = self.paginate_queryset(queryset)
         serializer = CRMContactPoolSerializer(page if page is not None else queryset, many=True)
         return self.get_paginated_response(serializer.data) if page is not None else Response(serializer.data)
@@ -1035,6 +1179,15 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
             )
             if contact.assigned_broker_id and contact.assigned_broker_id != broker.id:
                 raise ValidationError({"detail": "Este contato já foi assumido por outro corretor."})
+            identity_filter = Q()
+            if contact.document:
+                identity_filter |= Q(document=contact.document)
+            if contact.normalized_phone:
+                identity_filter |= Q(normalized_phone=contact.normalized_phone)
+            if contact.normalized_email:
+                identity_filter |= Q(normalized_email=contact.normalized_email)
+            if identity_filter and crm_contacts_owned_by(broker).exclude(pk=contact.pk).filter(identity_filter).exists():
+                raise ValidationError({"detail": "Este cliente já está cadastrado na sua carteira."})
             already_assigned = contact.assigned_broker_id == broker.id
             if not already_assigned:
                 contact.assigned_broker = broker
@@ -1074,6 +1227,85 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
                     metadata={"broker_id": str(broker.id)},
                 )
         return Response({"detail": "Contato adicionado à sua carteira.", "contact_id": str(contact.id)})
+
+    @action(detail=True, methods=["post"], url_path="release")
+    def release(self, request, pk=None):
+        if not request.user.is_staff:
+            raise PermissionDenied("Somente administradores podem remover contatos da carteira de um corretor.")
+        with transaction.atomic():
+            contact = get_object_or_404(
+                CRMContact.objects.select_for_update().select_related("assigned_broker"),
+                pk=pk,
+            )
+            holders = contact_holder_brokers(contact)
+            requested_broker = request.data.get("broker")
+            if requested_broker:
+                broker = get_object_or_404(holders, pk=requested_broker)
+            else:
+                holder_ids = list(holders.values_list("id", flat=True)[:2])
+                if not holder_ids:
+                    raise ValidationError({"detail": "Este contato não está atribuído a nenhum corretor."})
+                if len(holder_ids) > 1:
+                    raise ValidationError({"detail": "Informe qual corretor deve ser removido deste contato."})
+                broker = holders.get(pk=holder_ids[0])
+            open_opportunities = contact.opportunities.filter(broker=broker).exclude(
+                stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST],
+            )
+            pending_tasks = contact.tasks.filter(broker=broker, status=CRMTask.Status.PENDING)
+            opportunity_count = open_opportunities.update(broker=None)
+            task_count = pending_tasks.update(broker=None)
+            if contact.assigned_broker_id == broker.id:
+                contact.assigned_broker = None
+                contact.save(update_fields=["assigned_broker", "updated_at"])
+            returned_to_pool = not contact_holder_brokers(contact).exists()
+            CRMActivity.objects.create(
+                contact=contact,
+                actor=request.user,
+                kind=CRMActivity.Kind.NOTE,
+                description=f"Contato removido da carteira de {broker.name} pelo administrador.",
+                metadata={
+                    "event": "contact_released",
+                    "broker_id": str(broker.id),
+                    "open_opportunities_released": opportunity_count,
+                    "pending_tasks_released": task_count,
+                    "returned_to_pool": returned_to_pool,
+                },
+            )
+            AuditEvent.objects.create(
+                actor=request.user,
+                action="crm.contact.released",
+                entity_type="CRMContact",
+                entity_id=str(contact.id),
+                metadata={
+                    "broker_id": str(broker.id),
+                    "open_opportunities_released": opportunity_count,
+                    "pending_tasks_released": task_count,
+                    "returned_to_pool": returned_to_pool,
+                },
+            )
+        return Response({
+            "detail": (
+                "Contato removido da carteira e devolvido aos leads disponíveis."
+                if returned_to_pool
+                else "Contato removido deste corretor; ainda existe outro atendimento aberto."
+            ),
+            "contact_id": str(contact.id),
+            "returned_to_pool": returned_to_pool,
+        })
+
+    @action(detail=True, methods=["get"], url_path="holders")
+    def holders(self, request, pk=None):
+        if not request.user.is_staff:
+            raise PermissionDenied("Somente administradores podem consultar atribuições do contato.")
+        contact = self.get_object()
+        return Response([
+            {
+                "id": str(broker.id),
+                "name": broker.name,
+                "username": broker.user.username if broker.user_id else "",
+            }
+            for broker in contact_holder_brokers(contact).select_related("user")
+        ])
 
 
 class AdminCRMPropertyLinkViewSet(CRMAuditMixin, viewsets.ModelViewSet):

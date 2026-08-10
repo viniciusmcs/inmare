@@ -244,6 +244,12 @@ class CRMContactPoolSerializer(serializers.ModelSerializer):
         fields = ("id", "name", "city", "state", "profile", "source", "created_at")
 
 
+class CRMContactChoiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CRMContact
+        fields = ("id", "name", "phone", "email", "city")
+
+
 class CRMOpportunitySerializer(serializers.ModelSerializer):
     contact_name = serializers.CharField(source="contact.name", read_only=True)
     property_title = serializers.CharField(source="property.title", read_only=True)
