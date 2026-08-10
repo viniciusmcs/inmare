@@ -1234,7 +1234,7 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
             raise PermissionDenied("Somente administradores podem remover contatos da carteira de um corretor.")
         with transaction.atomic():
             contact = get_object_or_404(
-                CRMContact.objects.select_for_update().select_related("assigned_broker"),
+                CRMContact.objects.select_for_update(),
                 pk=pk,
             )
             holders = contact_holder_brokers(contact)
