@@ -401,6 +401,7 @@ class CRMOpportunity(TimeStamped):
         WON = "won", "Fechado"
         LOST = "lost", "Perdido"
         PAUSED = "paused", "Pausado"
+        RELEASED = "released", "Devolvido à fila"
 
     contact = models.ForeignKey(CRMContact, on_delete=models.CASCADE, related_name="opportunities")
     property = models.ForeignKey(Property, null=True, blank=True, on_delete=models.SET_NULL, related_name="crm_opportunities")

@@ -124,7 +124,7 @@ export type CRMOpportunity = {
   property?: string | null;
   property_title?: string;
   title: string;
-  stage: "new" | "contacted" | "visit" | "proposal" | "negotiation" | "won" | "lost" | "paused";
+  stage: "new" | "contacted" | "visit" | "proposal" | "negotiation" | "won" | "lost" | "paused" | "released";
   broker?: string | null;
   broker_name?: string;
   expected_value?: string | null;

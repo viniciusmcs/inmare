@@ -989,6 +989,38 @@ function Toast({
   );
 }
 
+function ConfirmToast({
+  title,
+  message,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    const timer = window.setTimeout(onCancel, 8000);
+    return () => window.clearTimeout(timer);
+  }, [onCancel]);
+
+  return <div className="admin-confirm-toast" role="alertdialog" aria-modal="true" aria-labelledby="admin-confirm-title">
+    <CircleAlert />
+    <div>
+      <b id="admin-confirm-title">{title}</b>
+      <p>{message}</p>
+      <span>
+        <button type="button" className="outline" onClick={onCancel}>Cancelar</button>
+        <button type="button" className="confirm-toast-action" onClick={onConfirm}>{confirmLabel}</button>
+      </span>
+    </div>
+    <i />
+  </div>;
+}
+
 const crmStageLabels: Record<CRMOpportunity["stage"], string> = {
   new: "Lead recebido",
   contacted: "Contato realizado",
@@ -998,9 +1030,10 @@ const crmStageLabels: Record<CRMOpportunity["stage"], string> = {
   won: "Fechado",
   lost: "Perdido",
   paused: "Pausado",
+  released: "Devolvido à fila",
 };
 
-const crmStages = Object.keys(crmStageLabels) as CRMOpportunity["stage"][];
+const crmStages = (Object.keys(crmStageLabels) as CRMOpportunity["stage"][]).filter((stage) => stage !== "released");
 
 function maskDocument(value?: string | null) {
   if (!value) return "Não informado";
@@ -1098,6 +1131,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
   const [debouncedPoolSearch, setDebouncedPoolSearch] = useState("");
   const [poolPage, setPoolPage] = useState(1);
   const [editingContact, setEditingContact] = useState<CRMContact | null>(null);
+  const [pendingRelease, setPendingRelease] = useState<{ contact: CRMContact; holder: CRMContactHolder } | null>(null);
   const [showContactForm, setShowContactForm] = useState(false);
   const [contactForm, setContactForm] = useState({ name: "", person_type: "individual", document: "", phone: "", email: "", profile: "general", city: "", state: "", source: "manual", notes: "", assigned_broker: "" });
   const [opportunityForm, setOpportunityForm] = useState({ contact: "", property: "", title: "", expected_value: "", broker: "" });
@@ -1276,11 +1310,9 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
       email: contact.email, profile: contact.profile, city: contact.city, state: contact.state, source: contact.source, notes: contact.notes, assigned_broker: contact.assigned_broker ?? "",
     });
   };
-  const releaseContact = async (holder: CRMContactHolder) => {
-    if (!editingContact) return;
-    if (!window.confirm(`Remover ${editingContact.name} da carteira de ${holder.name}${holder.username ? ` (${holder.username})` : ""}? O contato voltará para Leads disponíveis quando não houver outro atendimento aberto.`)) return;
+  const releaseContact = async (contact: CRMContact, holder: CRMContactHolder) => {
     try {
-      const response = await api.post<{ detail: string }>(`/admin/crm/contacts/${editingContact.id}/release/`, { broker: holder.id });
+      const response = await api.post<{ detail: string }>(`/admin/crm/contacts/${contact.id}/release/`, { broker: holder.id });
       notify(response.data.detail);
       resetContactForm();
       await refreshCRM();
@@ -1481,6 +1513,17 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
   };
 
   return <div className="crm-panel">
+    {pendingRelease && <ConfirmToast
+      title="Remover atendimento do corretor?"
+      message={`${pendingRelease.contact.name} sairá da carteira de ${pendingRelease.holder.name}${pendingRelease.holder.username ? ` (${pendingRelease.holder.username})` : ""} e voltará para Leads disponíveis.`}
+      confirmLabel="Sim, remover"
+      onCancel={() => setPendingRelease(null)}
+      onConfirm={() => {
+        const target = pendingRelease;
+        setPendingRelease(null);
+        void releaseContact(target.contact, target.holder);
+      }}
+    />}
     <section className="crm-welcome">
       <div><small>VISÃO COMERCIAL</small><h2>Seja bem-vindo, {session.display_name || session.broker_name || session.username}.</h2><p>Acompanhe negociações, compromissos e resultados em um só lugar.</p></div>
       <span className="crm-welcome-date"><CalendarDays /> {new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long" })}</span>
@@ -1562,7 +1605,7 @@ function CRMPanel({ properties, session, notify }: { properties: Property[]; ses
         <label>Origem<input value={contactForm.source} onChange={(event) => setContactForm({ ...contactForm, source: event.target.value })} /></label>
         {session.can_view_all_crm && <label>Corretor responsável<select value={contactForm.assigned_broker} onChange={(event) => setContactForm({ ...contactForm, assigned_broker: event.target.value })}><option value="">Sem responsável</option>{teamReference.map((broker) => <option value={broker.id} key={broker.id}>{broker.name}</option>)}</select></label>}
         <label className="crm-notes">Observações<textarea rows={4} value={contactForm.notes} onChange={(event) => setContactForm({ ...contactForm, notes: event.target.value })} /></label>
-      </div><span className="crm-row-actions"><button className="gold-button" onClick={saveContact}><Save /> Salvar contato</button>{session.can_manage_team && (contactHoldersQuery.data ?? []).map((holder) => <button key={holder.id} className="outline" onClick={() => releaseContact(holder)}><X /> Remover de {holder.name}{holder.username ? ` (${holder.username})` : ""}</button>)}</span>
+      </div><span className="crm-row-actions"><button className="gold-button" onClick={saveContact}><Save /> Salvar contato</button>{session.can_manage_team && editingContact && (contactHoldersQuery.data ?? []).map((holder) => <button key={holder.id} className="outline" onClick={() => setPendingRelease({ contact: editingContact, holder })}><X /> Remover de {holder.name}{holder.username ? ` (${holder.username})` : ""}</button>)}</span>
       {editingContact && <><div className="crm-link-editor"><h3>Vincular proprietário e imóvel</h3><div className="form-grid"><label>Imóvel cadastrado<select value={linkForm.property} onChange={(event) => setLinkForm({ ...linkForm, property: event.target.value })}><option value="">Unidade externa</option>{crmProperties.filter((property) => property.id).map((property) => <option key={property.id} value={property.id}>{property.title}</option>)}</select></label><label>Empreendimento<input value={linkForm.development_name} onChange={(event) => setLinkForm({ ...linkForm, development_name: event.target.value })} /></label><label>Unidade/lote<input value={linkForm.unit_reference} onChange={(event) => setLinkForm({ ...linkForm, unit_reference: event.target.value })} /></label><label>Relação<select value={linkForm.relationship} onChange={(event) => setLinkForm({ ...linkForm, relationship: event.target.value })}><option value="owner">Proprietário</option><option value="co_owner">Coproprietário</option><option value="interested">Interessado</option><option value="representative">Representante</option></select></label></div><button className="outline" onClick={createPropertyLink}><Building2 /> Registrar vínculo</button><div className="crm-links">{editingContact.property_links.map((link) => <span key={link.id}>{link.property_title || `${link.development_name} ${link.unit_reference}`}</span>)}</div></div><div className="crm-timeline"><h3>Histórico de atendimento</h3><div className="crm-note-form"><textarea rows={3} placeholder="Registrar ligação, conversa ou observação" value={activityNote} onChange={(event) => setActivityNote(event.target.value)} /><button className="outline" onClick={addActivity}><Plus /> Adicionar</button></div>{(activitiesQuery.data ?? []).map((activity) => <article key={activity.id}><i /><span><b>{activity.kind}</b><p>{activity.description}</p><small>{new Date(activity.created_at).toLocaleString("pt-BR")}{activity.actor_name ? ` · ${activity.actor_name}` : ""}</small></span></article>)}</div></>}
       </section>}
       <section className="admin-card"><div className="crm-contact-list">{filteredContacts.map((contact) => <button key={contact.id} onClick={() => editContact(contact)}><span className="crm-avatar">{contact.name.slice(0, 1)}</span><span><b>{contact.name}</b><small>{contact.phone || contact.email || "Sem contato informado"}</small></span><span><i>{contact.profile}</i><small>{contact.property_links.length} imóvel(is) · {contact.opportunity_count} oportunidade(s)</small></span><span><small>{maskDocument(contact.document)}</small><em>Editar</em></span></button>)}</div>{contactsQuery.isFetching && <p className="filter-empty">Buscando contatos...</p>}{!contactsQuery.isFetching && !filteredContacts.length && <p className="filter-empty">Nenhum contato encontrado.</p>}{contactsQuery.data && (contactsQuery.data.previous || contactsQuery.data.next) && <div className="admin-pagination"><span>{contactsQuery.data.count} contato(s)</span><div><button className="outline" disabled={!contactsQuery.data.previous} onClick={() => setContactPage((page) => Math.max(1, page - 1))}>Anterior</button><b>Página {contactPage}</b><button className="outline" disabled={!contactsQuery.data.next} onClick={() => setContactPage((page) => page + 1)}>Próxima</button></div></div>}</section>
@@ -1822,6 +1865,7 @@ function HeroVideoManager({ settings, notify, onChanged }: { settings: SiteSetti
   const [video, setVideo] = useState<File | null>(null);
   const [poster, setPoster] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
   const preview = video ? URL.createObjectURL(video) : settings.hero_video_src;
   const posterPreview = poster ? URL.createObjectURL(poster) : settings.hero_poster_src;
   const upload = async () => {
@@ -1849,7 +1893,7 @@ function HeroVideoManager({ settings, notify, onChanged }: { settings: SiteSetti
     } catch (error) { notify(friendlyApiError(error), true); }
   };
   const clear = async () => {
-    if (!settings.id || !settings.hero_video_src || !window.confirm("Excluir o vídeo de fundo e a capa cadastrada?")) return;
+    if (!settings.id || !settings.hero_video_src) return;
     try {
       const response = await api.post(`/admin/content/${settings.id}/clear-hero-video/`);
       onChanged(response.data); setVideo(null); setPoster(null);
@@ -1857,6 +1901,13 @@ function HeroVideoManager({ settings, notify, onChanged }: { settings: SiteSetti
     } catch (error) { notify(friendlyApiError(error), true); }
   };
   return <section className="admin-card hero-video-manager">
+    {confirmClear && <ConfirmToast
+      title="Excluir vídeo da página inicial?"
+      message="O vídeo e a imagem de capa serão removidos. As imagens do Header voltarão a aparecer."
+      confirmLabel="Sim, excluir"
+      onCancel={() => setConfirmClear(false)}
+      onConfirm={() => { setConfirmClear(false); void clear(); }}
+    />}
     <div className="hero-video-admin-head"><div><h2>Vídeo de fundo da Home</h2><p>Envie um MP4 horizontal. Ele será reproduzido sem som, em loop, atrás dos filtros. Limite: 100 MB.</p></div>{settings.hero_video_src && <i className={settings.hero_video_enabled ? "enabled" : ""}>{settings.hero_video_enabled ? "Ativo" : "Pausado"}</i>}</div>
     <div className="hero-video-admin-grid">
       <div className="hero-video-preview">{preview ? <video key={preview} src={preview} poster={posterPreview} muted loop playsInline controls /> : <div><Upload /><b>Nenhum vídeo cadastrado</b><span>A Home continua usando as imagens do Header.</span></div>}</div>
@@ -1865,7 +1916,7 @@ function HeroVideoManager({ settings, notify, onChanged }: { settings: SiteSetti
         <label className="header-drop compact"><ImagePlus /><b>{poster ? poster.name : "Imagem de capa (opcional)"}</b><span>Mostrada enquanto o vídeo carrega ou se não puder reproduzir.</span><input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={(event) => setPoster(event.target.files?.[0] ?? null)} /></label>
       </div>
     </div>
-    <div className="hero-video-actions"><button className="gold-button" disabled={busy || !video} onClick={upload}>{busy ? "Enviando vídeo..." : <><Upload /> Salvar e ativar vídeo</>}</button>{settings.hero_video_src && <button className="outline" onClick={toggle}>{settings.hero_video_enabled ? "Pausar vídeo" : "Ativar vídeo"}</button>}{settings.hero_video_src && <button className="outline danger-action" onClick={clear}><Trash2 /> Excluir vídeo</button>}</div>
+    <div className="hero-video-actions"><button className="gold-button" disabled={busy || !video} onClick={upload}>{busy ? "Enviando vídeo..." : <><Upload /> Salvar e ativar vídeo</>}</button>{settings.hero_video_src && <button className="outline" onClick={toggle}>{settings.hero_video_enabled ? "Pausar vídeo" : "Ativar vídeo"}</button>}{settings.hero_video_src && <button className="outline danger-action" onClick={() => setConfirmClear(true)}><Trash2 /> Excluir vídeo</button>}</div>
   </section>;
 }
 
@@ -2467,7 +2518,6 @@ function Editor({
                   className="confirm-delete catalog-delete"
                   disabled={creatingOption}
                   onClick={async () => {
-                    if (!window.confirm(`Excluir “${optionDialog.option?.name}” do catálogo?`)) return;
                     setCreatingOption(true);
                     setOptionError("");
                     try {

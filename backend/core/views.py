@@ -1109,7 +1109,11 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
             super().perform_update(serializer)
             if broker_changed and old_broker != new_broker:
                 active_opportunities = serializer.instance.opportunities.exclude(
-                    stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST],
+                    stage__in=[
+                        CRMOpportunity.Stage.WON,
+                        CRMOpportunity.Stage.LOST,
+                        CRMOpportunity.Stage.RELEASED,
+                    ],
                 )
                 pending_tasks = serializer.instance.tasks.filter(status=CRMTask.Status.PENDING)
                 if old_broker:
@@ -1118,15 +1122,35 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
                 else:
                     active_opportunities = active_opportunities.filter(broker__isnull=True)
                     pending_tasks = pending_tasks.filter(broker__isnull=True)
-                active_opportunities.update(broker=new_broker)
-                pending_tasks.update(broker=new_broker)
+                if new_broker:
+                    assigned_opportunity_count = active_opportunities.update(broker=new_broker)
+                    pending_tasks.update(broker=new_broker)
+                    if not old_broker and not assigned_opportunity_count:
+                        released_opportunity = serializer.instance.opportunities.filter(
+                            broker__isnull=True,
+                            stage=CRMOpportunity.Stage.RELEASED,
+                        ).order_by("-updated_at").first()
+                        if released_opportunity:
+                            released_opportunity.broker = new_broker
+                            released_opportunity.stage = CRMOpportunity.Stage.NEW
+                            released_opportunity.save(update_fields=["broker", "stage", "updated_at"])
+                else:
+                    active_opportunities.update(
+                        broker=None,
+                        stage=CRMOpportunity.Stage.RELEASED,
+                    )
+                    pending_tasks.update(broker=None, status=CRMTask.Status.CANCELED)
 
     @action(detail=False, methods=["get"], url_path="summary")
     def summary(self, request):
         return Response({
             "contacts": crm_contacts_for(request.user).count(),
             "open_opportunities": crm_opportunities_for(request.user).exclude(
-                stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST],
+                stage__in=[
+                    CRMOpportunity.Stage.WON,
+                    CRMOpportunity.Stage.LOST,
+                    CRMOpportunity.Stage.RELEASED,
+                ],
             ).count(),
             "pending_follow_ups": crm_tasks_for(request.user).filter(
                 status=CRMTask.Status.PENDING,
@@ -1154,7 +1178,11 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
         ).exclude(
             opportunities__in=CRMOpportunity.objects.exclude(
                 broker__isnull=True,
-            ).exclude(stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST]),
+            ).exclude(stage__in=[
+                CRMOpportunity.Stage.WON,
+                CRMOpportunity.Stage.LOST,
+                CRMOpportunity.Stage.RELEASED,
+            ]),
         ).exclude(
             tasks__in=CRMTask.objects.filter(
                 broker__isnull=False,
@@ -1199,10 +1227,18 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
             ).order_by("created_at").first()
             if opportunity:
                 opportunity.broker = broker
-                opportunity.save(update_fields=["broker", "updated_at"])
+                update_fields = ["broker", "updated_at"]
+                if opportunity.stage == CRMOpportunity.Stage.RELEASED:
+                    opportunity.stage = CRMOpportunity.Stage.NEW
+                    update_fields.append("stage")
+                opportunity.save(update_fields=update_fields)
             elif not contact.opportunities.filter(
                 broker=broker,
-            ).exclude(stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST]).exists():
+            ).exclude(stage__in=[
+                CRMOpportunity.Stage.WON,
+                CRMOpportunity.Stage.LOST,
+                CRMOpportunity.Stage.RELEASED,
+            ]).exists():
                 opportunity = CRMOpportunity.objects.create(
                     contact=contact,
                     broker=broker,
@@ -1249,11 +1285,18 @@ class AdminCRMContactViewSet(CRMAuditMixin, viewsets.ModelViewSet):
                     raise ValidationError({"detail": "Informe qual corretor deve ser removido deste contato."})
                 broker = holders.get(pk=holder_ids[0])
             open_opportunities = contact.opportunities.filter(broker=broker).exclude(
-                stage__in=[CRMOpportunity.Stage.WON, CRMOpportunity.Stage.LOST],
+                stage__in=[
+                    CRMOpportunity.Stage.WON,
+                    CRMOpportunity.Stage.LOST,
+                    CRMOpportunity.Stage.RELEASED,
+                ],
             )
             pending_tasks = contact.tasks.filter(broker=broker, status=CRMTask.Status.PENDING)
-            opportunity_count = open_opportunities.update(broker=None)
-            task_count = pending_tasks.update(broker=None)
+            opportunity_count = open_opportunities.update(
+                broker=None,
+                stage=CRMOpportunity.Stage.RELEASED,
+            )
+            task_count = pending_tasks.update(broker=None, status=CRMTask.Status.CANCELED)
             if contact.assigned_broker_id == broker.id:
                 contact.assigned_broker = None
                 contact.save(update_fields=["assigned_broker", "updated_at"])
@@ -1672,7 +1715,9 @@ class CRMReportView(APIView):
             trend[row["day"].isoformat()]["won"] = row["total"]
 
         source_rows = period_opportunities.values("source").annotate(total=Count("id")).order_by("-total", "source")
-        stage_rows = opportunities.values("stage").annotate(total=Count("id"), value=Sum("expected_value")).order_by("stage")
+        stage_rows = opportunities.exclude(
+            stage=CRMOpportunity.Stage.RELEASED,
+        ).values("stage").annotate(total=Count("id"), value=Sum("expected_value")).order_by("stage")
         loss_rows = lost.exclude(loss_reason="").values("loss_reason").annotate(total=Count("id")).order_by("-total")[:10]
 
         brokers = Broker.objects.filter(active=True)

@@ -77,7 +77,7 @@ def test_server_search_finds_small_typing_errors_and_paginates_contacts():
 @pytest.mark.django_db
 def test_admin_releases_accidental_claim_without_erasing_history():
     broker, broker_client = make_broker("teste")
-    _, other_client = make_broker("teste2")
+    other_broker, other_client = make_broker("teste2")
     admin = get_user_model().objects.create_superuser("admin-release", "admin-release@example.com", "secret")
     admin_client = APIClient()
     admin_client.force_authenticate(admin)
@@ -105,7 +105,9 @@ def test_admin_releases_accidental_claim_without_erasing_history():
     completed_task.refresh_from_db()
     assert contact.assigned_broker is None
     assert open_opportunity.broker is None
+    assert open_opportunity.stage == CRMOpportunity.Stage.RELEASED
     assert pending_task.broker is None
+    assert pending_task.status == CRMTask.Status.CANCELED
     assert closed_opportunity.broker == broker
     assert completed_task.broker == broker
     assert broker_client.get("/api/v1/admin/crm/contacts/").data["count"] == 0
@@ -113,6 +115,14 @@ def test_admin_releases_accidental_claim_without_erasing_history():
         item["id"] for item in other_client.get("/api/v1/admin/crm/contacts/available/").data["results"]
     }
     assert AuditEvent.objects.filter(action="crm.contact.released", entity_id=str(contact.id)).exists()
+
+    reclaimed = other_client.post(f"/api/v1/admin/crm/contacts/{contact.id}/claim/")
+    assert reclaimed.status_code == 200
+    contact.refresh_from_db()
+    open_opportunity.refresh_from_db()
+    assert contact.assigned_broker == other_broker
+    assert open_opportunity.broker == other_broker
+    assert open_opportunity.stage == CRMOpportunity.Stage.NEW
 
 
 @pytest.mark.django_db
@@ -137,6 +147,17 @@ def test_admin_can_release_legacy_contact_held_only_by_open_opportunity():
     assert released.data["returned_to_pool"] is True
     opportunity.refresh_from_db()
     assert opportunity.broker is None
+    assert opportunity.stage == CRMOpportunity.Stage.RELEASED
+
+    reassigned = client.patch(
+        f"/api/v1/admin/crm/contacts/{contact.id}/",
+        {"assigned_broker": str(broker.id)},
+        format="json",
+    )
+    assert reassigned.status_code == 200
+    opportunity.refresh_from_db()
+    assert opportunity.broker == broker
+    assert opportunity.stage == CRMOpportunity.Stage.NEW
 
 
 @pytest.mark.django_db
